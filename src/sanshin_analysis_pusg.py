@@ -986,74 +986,20 @@ def run_simulation(args):
 
             zf = z_front_face
             zb = z_back_face
-            p_front_minus = p[mx0:mx1, my0:my1, zf - 1]
-            p_front_plus  = p[mx0:mx1, my0:my1, zf]
-            delta_p_front = p_front_minus - p_front_plus
-            p_back_minus = p[mx0:mx1, my0:my1, zb - 1]
-            p_back_plus  = p[mx0:mx1, my0:my1, zb]
-            delta_p_back = p_back_minus - p_back_plus
-
-            lap_front = membrane_laplacian_torch(w_front, dx, dy)
-            lap_back  = membrane_laplacian_torch(w_back, dx, dy)
-
-            a_front = (args.tension * lap_front - args.membrane_damping * v_front + delta_p_front) / sigma_s
-            a_back  = ((args.tension * args.back_tension_ratio) * lap_back
-                       - args.back_membrane_damping * v_back + delta_p_back) / sigma_s
-
-            drive_val = float(drive_np[step])
-            a_bridge = drive_val * accel_per_drive
-            a_front[bridge_x_l, bridge_y_local] = a_front[bridge_x_l, bridge_y_local] + a_bridge
-            a_front[bridge_x_r, bridge_y_local] = a_front[bridge_x_r, bridge_y_local] + a_bridge
-
-            v_front += dt * a_front
-            v_back  += dt * a_back
-            w_front += dt * v_front
-            w_back  += dt * v_back
-
-            for w, v in [(w_front, v_front), (w_back, v_back)]:
-                w[0, :] = 0.0
-                w[-1, :] = 0.0
-                w[:, 0] = 0.0
-                w[:, -1] = 0.0
-                v[0, :] = 0.0
-                v[-1, :] = 0.0
-                v[:, 0] = 0.0
-                v[:, -1] = 0.0
-            # 速度場の更新 (データ転送無し、通常のFDTD更新)
-            ux[1:nx, :, :] -= (dt / (RHO_AIR * dx)) * (p[1:, :, :] - p[:-1, :, :])
-            uy[:, 1:ny, :] -= (dt / (RHO_AIR * dy)) * (p[:, 1:, :] - p[:, :-1, :])
-            uz[:, :, 1:nz] -= (dt / (RHO_AIR * dz)) * (p[:, :, 1:] - p[:, :, :-1])
-
-            ux[0, :, :] = 0.0; ux[nx, :, :] = 0.0
-            uy[:, 0, :] = 0.0; uy[:, ny, :] = 0.0
-            uz[:, :, 0] = 0.0; uz[:, :, nz] = 0.0
-
-            # 膜速度が空気の垂直方向の粒子速度を駆動
-            uz[mx0:mx1, my0:my1, zf] = v_front
-            uz[mx0:mx1, my0:my1, zb] = v_back
-
-            ux *= ux_mask
-            uy *= uy_mask
-            uz *= uz_mask
-            ux *= sponge_ux
-            uy *= sponge_uy
-            uz *= sponge_uz
-
-            div = (
-                (ux[1:, :, :] - ux[:-1, :, :]) / dx
-                + (uy[:, 1:, :] - uy[:, :-1, :]) / dy
-                + (uz[:, :, 1:] - uz[:, :, :-1]) / dz
-            )
             farfield_due = farfield_surface is not None and (step % int(farfield_surface["interval"]) == 0)
             if farfield_due:
                 farfield_p_before = gather_farfield_pressure_faces(farfield_surface, p)
 
-            # 音圧場の更新
-            
-            p -= (K_AIR * dt) * div
-            p *= sponge_p
-            p *= air
-
+            # 時刻n+1の計算
+            drive_val = float(drive_np[step])
+            delta_p_front, delta_p_back = compiled_core_step(
+                p, ux, uy, uz, w_front, v_front, w_back, v_back,
+                air, ux_mask, uy_mask, uz_mask, sponge_p, sponge_ux, sponge_uy, sponge_uz,
+                drive_val, nx, ny, nz, dx, dy, dz, dt, RHO_AIR, K_AIR, sigma_s,
+                args.tension, args.back_tension_ratio, args.membrane_damping, args.back_membrane_damping,
+                accel_per_drive, mx0, mx1, my0, my1, zf, zb, bridge_x_l, bridge_x_r, bridge_y_local
+            )
+            # 中心差分
             if farfield_due:
                 farfield_p_after = gather_farfield_pressure_faces(farfield_surface, p)
                 farfield_un = gather_farfield_un_faces(farfield_surface, ux, uy, uz)
@@ -1178,7 +1124,6 @@ def run_simulation(args):
         },
     }
 
-    # 元のコードと完全に同じように明示的に指定する書き方
     front_frames_np  = np.asarray(front_frames, dtype=np.float32)
     back_frames_np   = np.asarray(back_frames, dtype=np.float32)
     pressure_frames_np = np.asarray(pressure_frames, dtype=np.float32)
@@ -1253,6 +1198,65 @@ def build_config():
         cool_every_steps=COOL_EVERY_STEPS if ENABLE_COOLING_SLEEP else 0,
         cool_sleep_sec=COOL_SLEEP_SEC if ENABLE_COOLING_SLEEP else 0.0,
     )
+def fdtd_core_step(
+    p, ux, uy, uz, w_front, v_front, w_back, v_back,
+    air, ux_mask, uy_mask, uz_mask, sponge_p, sponge_ux, sponge_uy, sponge_uz,
+    drive_val, nx, ny, nz, dx, dy, dz, dt, rho_air, k_air, sigma_s,
+    tension, back_tension_ratio, membrane_damping, back_membrane_damping,
+    accel_per_drive, mx0, mx1, my0, my1, zf, zb, bridge_x_l, bridge_x_r, bridge_y_local
+):
+    delta_p_front = p[mx0:mx1, my0:my1, zf - 1] - p[mx0:mx1, my0:my1, zf]
+    delta_p_back  = p[mx0:mx1, my0:my1, zb - 1] - p[mx0:mx1, my0:my1, zb]
+
+    lap_front = membrane_laplacian_torch(w_front, dx, dy)
+    lap_back  = membrane_laplacian_torch(w_back, dx, dy)
+
+    a_front = (tension * lap_front - membrane_damping * v_front + delta_p_front) / sigma_s
+    a_back  = ((tension * back_tension_ratio) * lap_back - back_membrane_damping * v_back + delta_p_back) / sigma_s
+
+    a_bridge = drive_val * accel_per_drive
+    a_front[bridge_x_l, bridge_y_local] += a_bridge
+    a_front[bridge_x_r, bridge_y_local] += a_bridge
+
+    v_front += dt * a_front
+    v_back  += dt * a_back
+    w_front += dt * v_front
+    w_back  += dt * v_back
+
+    w_front[0, :] = 0.0; w_front[-1, :] = 0.0; w_front[:, 0] = 0.0; w_front[:, -1] = 0.0
+    w_back[0, :]  = 0.0; w_back[-1, :]  = 0.0; w_back[:, 0]  = 0.0; w_back[:, -1]  = 0.0
+    v_front[0, :] = 0.0; v_front[-1, :] = 0.0; v_front[:, 0] = 0.0; v_front[:, -1] = 0.0
+    v_back[0, :]  = 0.0; v_back[-1, :]  = 0.0; v_back[:, 0]  = 0.0; v_back[:, -1]  = 0.0
+
+    ux[1:nx, :, :] -= (dt / (rho_air * dx)) * (p[1:, :, :] - p[:-1, :, :])
+    uy[:, 1:ny, :] -= (dt / (rho_air * dy)) * (p[:, 1:, :] - p[:, :-1, :])
+    uz[:, :, 1:nz] -= (dt / (rho_air * dz)) * (p[:, :, 1:] - p[:, :, :-1])
+
+    ux[0, :, :] = 0.0; ux[nx, :, :] = 0.0
+    uy[:, 0, :] = 0.0; uy[:, ny, :] = 0.0
+    uz[:, :, 0] = 0.0; uz[:, :, nz] = 0.0
+
+    uz[mx0:mx1, my0:my1, zf] = v_front
+    uz[mx0:mx1, my0:my1, zb] = v_back
+
+    ux *= ux_mask; uy *= uy_mask; uz *= uz_mask
+    ux *= sponge_ux; uy *= sponge_uy; uz *= sponge_uz
+
+    div = (
+        (ux[1:, :, :] - ux[:-1, :, :]) / dx
+        + (uy[:, 1:, :] - uy[:, :-1, :]) / dy
+        + (uz[:, :, 1:] - uz[:, :, :-1]) / dz
+    )
+
+    p -= (k_air * dt) * div
+    p *= sponge_p
+    p *= air
+
+    return delta_p_front, delta_p_back
+
+compiled_core_step = torch.compile(fdtd_core_step, mode="max-autotune")
+
+
 
 
 def main():

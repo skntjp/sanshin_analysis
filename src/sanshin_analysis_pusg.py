@@ -956,6 +956,7 @@ def run_simulation(args):
             f"points={farfield_surface['meta']['surface_point_count']}, "
             f"frames={farfield_surface['meta']['frame_count']}"
         )
+    drive_tensor = torch.from_numpy(drive_np).to(device0)
 
     with torch.no_grad():
         for step in range(nt):
@@ -991,7 +992,7 @@ def run_simulation(args):
                 farfield_p_before = gather_farfield_pressure_faces(farfield_surface, p)
 
             # 時刻n+1の計算
-            drive_val = float(drive_np[step])
+            drive_val = drive_tensor[step]
             delta_p_front, delta_p_back = compiled_core_step(
                 p, ux, uy, uz, w_front, v_front, w_back, v_back,
                 air, ux_mask, uy_mask, uz_mask, sponge_p, sponge_ux, sponge_uy, sponge_uz,

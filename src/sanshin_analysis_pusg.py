@@ -1259,7 +1259,8 @@ def main():
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     args = build_config()
     print(f"Running on Single GPU{RUN_NAME}: sim_time={args.sim_time}s")
-    summary, histories, front_frames, back_frames, pressure_frames, volume_frames, t_axis = run_simulation(args)
+    compiled_run = torch.compile(run_simulation, mode="max-autotune")
+    summary, histories, front_frames, back_frames, pressure_frames, volume_frames, t_axis = compiled_run(args)
 
     if args.save_npy:
         np.save(OUTPUT_NPY, np.asarray(volume_frames, dtype=np.float32))

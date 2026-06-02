@@ -19,7 +19,6 @@ else:
     SCRIPT_DIR = Path.cwd().resolve()
     DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output"
 
-DEFAULT_OUTPUT_DIR = SCRIPT_DIR
 GPU_DEVICE_IDS = (0,)
 DEVICES = tuple(f"cuda:{idx}" for idx in GPU_DEVICE_IDS)
 

@@ -1184,7 +1184,7 @@ def run_simulation(args):
     pressure_frames_np = np.asarray(pressure_frames, dtype=np.float32)
     volume_frames_np = np.asarray(volume_frames, dtype=np.float32)
 
-    return summary, histories, front_frames_np, back_frames_np, volume_frames_np, t_axis
+    return summary, histories, front_frames_np, back_frames_np, pressure_frames_np volume_frames_np, t_axis
 
 
 def extract_metrics(summary: dict) -> dict:

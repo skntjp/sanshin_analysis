@@ -14,8 +14,10 @@ import torch
 
 if "__file__" in globals():
     SCRIPT_DIR = Path(__file__).resolve().parent
+    DEFAULT_OUTPUT_DIR = SCRIPT_DIR.parent / "output"
 else:
     SCRIPT_DIR = Path.cwd().resolve()
+    DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output"
 
 DEFAULT_OUTPUT_DIR = SCRIPT_DIR
 GPU_DEVICE_IDS = (0,)

@@ -8,10 +8,10 @@ from scipy.signal import find_peaks
 # =========================================================
 # 0) 設定
 # =========================================================
-CONDITION_NAME = "High Tension (15kN)"
+CONDITION_NAME = "tension ratio 1.0, -"
 
-FILE_IMPULSE = "src/sanshin_force_imp_btr0p8_real.npy"
-FILE_SOUND = "src/sanshin_force_sound_real.npy"
+FILE_IMPULSE = "src/sanshin_force_imp_btr1_real.npy"
+FILE_SOUND = "src/sanshin_force_sound_btr1_real.npy"
 DEFAULT_SOUND_FILE = "sound_source/GenSound1.txt"
 
 OBS_DISTANCE_CM = 30.0
@@ -116,7 +116,7 @@ def extract_obs_wave(saved_data, params, obs_distance_cm):
     dx = get_dx_saved(params, nx)
     cx, cy, cz = nx // 2, ny // 2, nz // 2
     dist_grid = int((obs_distance_cm / 100.0) / dx)
-    obs_z = int(np.clip(cz + dist_grid, 0, nz - 1))
+    obs_z = int(np.clip(cz - dist_grid, 0, nz - 1))
     wave = saved_data[:, cx, cy, obs_z].astype(np.float64)
     wave -= np.mean(wave)
     return wave, dx, (cx, cy, obs_z)

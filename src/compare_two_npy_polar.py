@@ -190,7 +190,7 @@ def observation_wave(data: np.ndarray, params: dict, radius_m: float) -> np.ndar
     _nt, nx, ny, nz = data.shape
     cx, cy, cz = source_center_saved(params, (nx, ny, nz))
     dz_s = saved_spacing(params, "z")
-    iz = int(np.clip(round(cz + radius_m / dz_s), 0, nz - 1))
+    iz = int(np.clip(round(cz - radius_m / dz_s), 0, nz - 1))
     return data[:, int(round(cx)), int(round(cy)), iz]
 
 

@@ -1,406 +1,351 @@
-﻿from __future__ import annotations
-
-import argparse
-import csv
-from dataclasses import dataclass
+﻿import numpy as np
+import matplotlib.pyplot as plt
+import json
 from pathlib import Path
-
-import numpy as np
-
-import analyze_pu_backmem_npy_farfield as pu
+from scipy.signal import find_peaks
 
 
-if "__file__" in globals():
-    SCRIPT_DIR = Path(__file__).resolve().parent
-else:
-    SCRIPT_DIR = Path.cwd().resolve()
-DATA_DIR = SCRIPT_DIR.parent / "data"
-BUNDLE_DIR = SCRIPT_DIR.parent
+# =========================================================
+# 0) 設定
+# =========================================================
+CONDITION_NAME = "High Tension (15kN)"
 
-DEFAULT_IMP_NPY = DATA_DIR / "sanshin_force_imp_real.npy"
-DEFAULT_SOUND_NPY = DATA_DIR / "sanshin_force_sound_real.npy"
-DEFAULT_SOUND_FILE = BUNDLE_DIR / "sound_source" / "GenSound1.txt"
-DEFAULT_OUT_DIR = SCRIPT_DIR / "spectrum_imp_sound_real"
+FILE_IMPULSE = "src/sanshin_force_imp_btr0p8_real.npy"
+FILE_SOUND = "src/sanshin_force_sound_real.npy"
+DEFAULT_SOUND_FILE = "sound_source/GenSound1.txt"
 
-OBS_RADIUS_M = 0.30
+OBS_DISTANCE_CM = 30.0
 FREQ_MAX_HZ = 3000.0
+
 NORM_FMAX_HZ = 3000.0
 NORM_OFFSET_DB = -20.0
-ZERO_PAD_FACTOR = 8
+
+IGNORE_FREQ = 300.0
+IGNORE_TOLERANCE = 30.0
+PEAK_MIN_DB = -45.0
+PEAK_MIN_SEP_HZ = 100.0
+TOP_K_MODES = 4
+
+DELTA_LOCAL_WINDOW_HZ = 150.0
 SMOOTH_HZ = 40.0
-INPUT_SMOOTH_HZ = 5.0
 REL_BASELINE_MIN_HZ = 150.0
 REL_BASELINE_MAX_HZ = 3000.0
-DELTA_YMIN = -30.0
-DELTA_YMAX = 30.0
+DELTA_YMIN = -60.0
+DELTA_YMAX = 60.0
 
+SAVE_NAME = "fig3_spectrum_analysis.png"
+SAVE_PNG = True
+SHOW_FIGURE = True
 SAVE_DPI = 300
-FIG_W = 11.5
-FIG_H = 10.2
 SAVE_PAD_IN = 0.35
-TIGHT_RECT = (0, 0, 1, 1)
+FIG_W = 11.5
+FIG_H = 8.2
+SUPTITLE_Y = 0.985
+TIGHT_RECT = (0, 0, 1, 0.95)
 
-FONT_FAMILY = "serif"
-FONT_SIZE_BASE = 16
-FONT_SIZE_TITLE = 20
-FONT_SIZE_LEGEND = 18
-FONT_SIZE_TICK = 14
-LEGEND_SCALE = 0.70
-LEGEND_FONTSIZE = max(8, int(round(FONT_SIZE_LEGEND * LEGEND_SCALE)))
-
-
-@dataclass
-class VolumeCase:
-    path: Path
-    data: np.ndarray
-    params: dict
-    dt_saved: float
-    wave: np.ndarray
-    freqs: np.ndarray
-    mag: np.ndarray
-    db: np.ndarray
-    db_sm: np.ndarray
+SPECTRUM_YMIN = -120
+SPECTRUM_YMAX = 20
+IMPULSE_FILL_COLOR = "gray"
+IMPULSE_FILL_ALPHA = 0.15
+INPUT_COLOR = "tab:blue"
+OUTPUT_COLOR = "tab:orange"
+DELTA_COLOR = "tab:green"
+MARKER_COLOR = "tab:red"
+GRID_ALPHA = 0.6
+LEGEND_LOC = "lower left"
+LEGEND_FONTSIZE = 9
 
 
-def require_matplotlib():
-    import matplotlib
+# =========================================================
+# 1) 入出力・時間/空間刻み
+# =========================================================
+def load_pkg(path_str):
+    path = Path(path_str)
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    loaded = np.load(path, allow_pickle=True)
+    
+    # 1) 元のパッケージ型（辞書型）での読み込みを試みる
+    if loaded.shape == ():
+        pkg = loaded.item()
+        return pkg["data"], pkg.get("params", {})
+        
+    # 2) 純粋な配列だった場合、同名の _summary.json から params を探す
+    params = {}
+    json_path = path.with_name(path.stem + "_summary.json")
+    
+    if json_path.exists():
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+                # sanshin_analysis_pusg.py の出力構造に対応
+                if "summary" in meta and "params" in meta["summary"]:
+                    params = meta["summary"]["params"]
+                elif "params" in meta:
+                    params = meta["params"]
+            print(f"Loaded parameters from {json_path.name}")
+        except Exception as e:
+            print(f"Warning: Failed to load JSON parameters from {json_path}: {e}")
+    else:
+        print(f"Warning: Summary JSON not found at {json_path}. Parameters will be empty.")
+            
+    return loaded, params
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
 
-    plt.rcParams.update(
-        {
-            "font.family": FONT_FAMILY,
-            "font.size": FONT_SIZE_BASE,
-            "axes.titlesize": FONT_SIZE_TITLE,
-            "axes.labelsize": FONT_SIZE_BASE,
-            "legend.fontsize": FONT_SIZE_LEGEND,
-            "xtick.labelsize": FONT_SIZE_TICK,
-            "ytick.labelsize": FONT_SIZE_TICK,
-            "figure.titlesize": FONT_SIZE_TITLE,
-        }
-    )
-    return plt
+def get_dx_saved(params, nx_saved):
+    nx = int(params.get("nx", 500))
+    pml = int(params.get("pml_width", 50))
+    dx_sim = float(params.get("dx", 0.002))
+    phys_width = dx_sim * (nx - 2 * pml)
+    return phys_width / nx_saved
 
 
-def spectrum_mag(wave: np.ndarray, dt: float, zp_factor: int = 1) -> tuple[np.ndarray, np.ndarray, float]:
-    wave = np.asarray(wave, dtype=np.float64)
-    wave = wave - np.mean(wave)
-    n = len(wave)
-    nfft = max(n, int(n * max(1, zp_factor)))
-    spec = np.fft.rfft(wave * np.hanning(n), n=nfft)
-    freqs = np.fft.rfftfreq(nfft, d=dt)
-    return freqs, np.abs(spec), 1.0 / dt
+def get_dt_frame(params, nt_saved):
+    if "dt" in params and "volume_save_interval" in params:
+        return float(params["dt"]) * int(params["volume_save_interval"])
+    if "sim_time" in params and "nt" in params and "volume_save_interval" in params:
+        dt = float(params["sim_time"]) / int(params["nt"])
+        return dt * int(params["volume_save_interval"])
+    if "sim_time" in params and nt_saved > 1:
+        return float(params["sim_time"]) / float(nt_saved - 1)
+    raise ValueError("Cannot determine dt_frame from params.")
 
 
-def calc_rms_ref(freqs: np.ndarray, mag: np.ndarray, f_max: float) -> float:
-    mask = (freqs >= 10.0) & (freqs <= f_max)
+def extract_obs_wave(saved_data, params, obs_distance_cm):
+    nt, nx, ny, nz = saved_data.shape
+    dx = get_dx_saved(params, nx)
+    cx, cy, cz = nx // 2, ny // 2, nz // 2
+    dist_grid = int((obs_distance_cm / 100.0) / dx)
+    obs_z = int(np.clip(cz + dist_grid, 0, nz - 1))
+    wave = saved_data[:, cx, cy, obs_z].astype(np.float64)
+    wave -= np.mean(wave)
+    return wave, dx, (cx, cy, obs_z)
+
+
+def build_sound_input_series(params, nt_saved, dt_frame):
+    sound_file = params.get("sound_file", None) or DEFAULT_SOUND_FILE
+    src_fs = float(params.get("src_fs", 44100.0))
+    gain = float(params.get("sound_gain", 1.0))
+
+    if not Path(sound_file).exists():
+        print(f"Warning: Sound source {sound_file} not found. Using silence.")
+        return np.zeros(nt_saved)
+
+    src = np.loadtxt(sound_file, dtype=np.float64)
+    t_src = np.arange(len(src), dtype=np.float64) / src_fs
+    t = np.arange(nt_saved, dtype=np.float64) * dt_frame
+    x = np.interp(t, t_src, src, left=0.0, right=0.0)
+
+    mx = np.max(np.abs(x))
+    if mx > 0:
+        x = x / mx
+    x = x * gain
+    x -= np.mean(x)
+    return x
+
+
+# =========================================================
+# 2) スペクトル・正規化
+# =========================================================
+def spectrum_mag(wave, dt):
+    N = len(wave)
+    fs = 1.0 / dt
+    w = np.hanning(N)
+    X = np.fft.rfft(wave * w)
+    freqs = np.fft.rfftfreq(N, d=dt)
+    mag = np.abs(X)
+    return freqs, mag, fs
+
+
+def calc_rms_ref(freqs, mag, f_max):
+    mask = (freqs <= f_max) & (freqs >= 10.0)
     if not np.any(mask):
-        return float(np.max(mag)) if mag.size else 1.0
-    return float(np.sqrt(np.mean(np.square(mag[mask]))))
+        return np.max(mag) if len(mag) > 0 else 1.0
+    rms_val = np.sqrt(np.mean(mag[mask] ** 2))
+    return rms_val
 
 
-def db20(x: np.ndarray, ref: float = 1.0) -> np.ndarray:
+def moving_average_hz(y, freqs, smooth_hz):
+    df = freqs[1] - freqs[0]
+    bins = max(1, int(round(smooth_hz / df)))
+    if bins <= 1:
+        return y.copy(), bins, df
+    kernel = np.ones(bins, dtype=np.float64) / bins
+    y_sm = np.convolve(y, kernel, mode="same")
+    return y_sm, bins, df
+
+
+def db20(x, ref=1.0):
     eps = 1e-30
     return 20.0 * np.log10((x + eps) / (ref + eps))
 
 
-def moving_average_hz(y: np.ndarray, freqs: np.ndarray, smooth_hz: float) -> tuple[np.ndarray, int, float]:
-    if smooth_hz <= 0.0 or len(freqs) < 2:
-        df = float(freqs[1] - freqs[0]) if len(freqs) > 1 else 1.0
-        return y.copy(), 1, df
-    df = float(freqs[1] - freqs[0])
-    bins = max(1, int(round(float(smooth_hz) / df)))
-    if bins <= 1:
-        return y.copy(), 1, df
-    kernel = np.ones(bins, dtype=np.float64) / bins
-    return np.convolve(y, kernel, mode="same"), bins, df
+# =========================================================
+# 3) モード検出・ピーク取得
+# =========================================================
+def find_impulse_modes_topk(freqs, mag, fs, top_k=4, fmin=0.0, fmax=3000.0):
+    mag_db = db20(mag, ref=np.max(mag))
+    band_mask = (freqs >= fmin) & (freqs <= fmax)
+    if not np.any(band_mask):
+        return []
+
+    freqs_b = freqs[band_mask]
+    mag_db_b = mag_db[band_mask]
+    df = freqs_b[1] - freqs_b[0]
+    min_dist_bins = max(1, int(round(PEAK_MIN_SEP_HZ / df)))
+
+    peaks, _ = find_peaks(mag_db_b, height=PEAK_MIN_DB, distance=min_dist_bins)
+
+    cand = []
+    for p in peaks:
+        f = float(freqs_b[p])
+        if abs(f - IGNORE_FREQ) <= IGNORE_TOLERANCE:
+            continue
+        cand.append((f, float(mag_db_b[p])))
+
+    cand.sort(key=lambda x: x[1], reverse=True)
+
+    modes = []
+    for f, _ in cand:
+        if all(abs(f - g) > 30.0 for g in modes):
+            modes.append(f)
+        if len(modes) >= top_k:
+            break
+
+    return sorted(modes)
 
 
-def load_volume_case(path: Path, radius_m: float, zp_factor: int, smooth_hz: float) -> VolumeCase:
-    pkg = pu.load_volume_with_metadata(path)
-    data = pkg["data"]
-    params = pkg["params"]
-    dt_saved = pu.saved_dt(params, pkg["t"], int(data.shape[0]))
-    wave = pu.observation_wave(data, params, radius_m)
-    freqs, mag, _ = spectrum_mag(wave, dt_saved, zp_factor)
-    ref = calc_rms_ref(freqs, mag, NORM_FMAX_HZ)
-    db = db20(mag, ref) + NORM_OFFSET_DB
-    db_sm, _, _ = moving_average_hz(db, freqs, smooth_hz)
-    return VolumeCase(path, data, params, dt_saved, wave, freqs, mag, db, db_sm)
+def pick_local_peak(freqs, y, f0, window_hz):
+    fmin = f0 - window_hz
+    fmax = f0 + window_hz
+    mask = (freqs >= fmin) & (freqs <= fmax)
+    if not np.any(mask):
+        return None, None
+    idxs = np.where(mask)[0]
+    k = idxs[np.argmax(y[idxs])]
+    return float(freqs[k]), float(y[k])
 
 
-def resolve_sound_file(params: dict, explicit: Path | None) -> Path:
-    if explicit is not None:
-        if not explicit.exists():
-            raise FileNotFoundError(f"sound file not found: {explicit}")
-        return explicit
-
-    drive_meta = params.get("drive_meta", {})
-    candidates: list[Path] = []
-    meta_path = drive_meta.get("sound_file")
-    if meta_path:
-        candidates.append(Path(str(meta_path)))
-        candidates.append(BUNDLE_DIR / "sound_source" / Path(str(meta_path)).name)
-    candidates.append(DEFAULT_SOUND_FILE)
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError("GenSound1.txt was not found in expected local paths.")
+def place_label_safely(ax, x, y, text, ypad=3.0):
+    ymin, ymax = ax.get_ylim()
+    if y > ymax - 10.0:
+        yy = y - ypad
+        va = "top"
+    elif y < ymin + 10.0:
+        yy = y + ypad
+        va = "bottom"
+    else:
+        yy = y + ypad
+        va = "bottom"
+    ax.text(x, yy, text, ha="center", va=va, fontsize=8, clip_on=False)
 
 
-def build_gensound_drive(params: dict, nt_saved: int, dt_saved: float, sound_file: Path | None) -> np.ndarray:
-    drive_meta = params.get("drive_meta", {})
-    path = resolve_sound_file(params, sound_file)
-    src = np.loadtxt(path, dtype=np.float64)
-    if src.ndim != 1:
-        src = np.ravel(src)
-    peak = float(np.max(np.abs(src))) if src.size else 0.0
-    if peak > 0.0:
-        src = src / peak
+# =========================================================
+# 4) 描画
+# =========================================================
+def plot_results(f_imp, imp_db_sm, f_in, in_db_sm, f_out, out_db_sm, Delta_rel, modes, fmax_plot):
+    fig, axes = plt.subplots(2, 1, figsize=(FIG_W, FIG_H), sharex=True)
 
-    src_fs = float(drive_meta.get("sound_sample_rate_hz", 20000.0))
-    if bool(drive_meta.get("sound_onset_detect", True)):
-        thresh = float(drive_meta.get("sound_onset_thresh", 0.02))
-        search_n = src.size
-        mask = np.abs(src[:search_n]) >= thresh
-        if np.any(mask):
-            src = src[int(np.argmax(mask)) :]
-
-    t_src = np.arange(src.size, dtype=np.float64) / src_fs
-    t_saved = np.arange(nt_saved, dtype=np.float64) * dt_saved
-    drive = np.interp(t_saved, t_src, src, left=0.0, right=0.0)
-    drive *= float(drive_meta.get("sound_gain", 1.0))
-
-    if str(drive_meta.get("sound_drive_mode", "gated")).lower() == "gated":
-        apply_steps = min(nt_saved, max(1, int(round(float(drive_meta.get("sound_apply_sec", 0.03)) / dt_saved))))
-        fade_steps = max(0, int(round(float(drive_meta.get("sound_fade_sec", 0.005)) / dt_saved)))
-        gated = np.zeros_like(drive)
-        envelope = np.ones(apply_steps, dtype=np.float64)
-        if fade_steps > 0 and fade_steps * 2 < apply_steps:
-            fade = 0.5 * (1.0 + np.cos(np.linspace(0.0, np.pi, fade_steps, dtype=np.float64)))
-            envelope[-fade_steps:] *= fade
-        gated[:apply_steps] = drive[:apply_steps] * envelope
-        drive = gated
-
-    drive -= np.mean(drive)
-    return drive
-
-
-def build_measured_string_spectrum(params: dict, sound_file: Path | None, smooth_hz: float, zp_factor: int):
-    drive_meta = params.get("drive_meta", {})
-    path = resolve_sound_file(params, sound_file)
-    src = np.loadtxt(path, dtype=np.float64)
-    if src.ndim != 1:
-        src = np.ravel(src)
-    peak = float(np.max(np.abs(src))) if src.size else 0.0
-    if peak > 0.0:
-        src = src / peak
-    if bool(drive_meta.get("sound_onset_detect", True)):
-        thresh = float(drive_meta.get("sound_onset_thresh", 0.02))
-        mask = np.abs(src) >= thresh
-        if np.any(mask):
-            src = src[int(np.argmax(mask)) :]
-    sample_rate_hz = float(drive_meta.get("sound_sample_rate_hz", 20000.0))
-    freqs, mag, _ = spectrum_mag(src, 1.0 / sample_rate_hz, zp_factor)
-    ref = float(np.max(mag)) if mag.size else 1.0
-    db = db20(mag, ref)
-    db_sm, _, _ = moving_average_hz(db, freqs, smooth_hz)
-    return freqs, db_sm
-
-
-def theory_mode_freqs(params: dict, pairs: str) -> list[float]:
-    modes: list[float] = []
-    for m, n in pu.parse_mode_pairs(pairs):
-        f_theory = pu.front_membrane_theory_freq(params, m, n)
-        modes.append(float(f_theory))
-    return modes
-
-
-def save_csv(path: Path, f_out: np.ndarray, in_db: np.ndarray, out_db: np.ndarray, imp_db: np.ndarray, delta: np.ndarray, fmax: float) -> None:
-    mask = f_out <= fmax
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["frequency_hz", "gensound_input_db_sm", "sound_output_db_sm", "impulse_db_sm", "delta_rel_db"])
-        for row in zip(f_out[mask], in_db[mask], out_db[mask], imp_db[mask], delta[mask]):
-            writer.writerow([f"{float(v):.6f}" for v in row])
-
-
-def draw_spectrum_figure(
-    plt,
-    f_imp: np.ndarray,
-    imp_db: np.ndarray,
-    f_input_ref: np.ndarray,
-    input_ref_db: np.ndarray,
-    f_out: np.ndarray,
-    out_db: np.ndarray,
-    delta_rel: np.ndarray,
-    modes: list[float],
-    xlim: tuple[float, float],
-):
-    lo, hi = float(xlim[0]), float(xlim[1])
-    mask_imp = (f_imp >= lo) & (f_imp <= hi)
-    mask_input = (f_input_ref >= lo) & (f_input_ref <= hi)
-    mask_out = (f_out >= lo) & (f_out <= hi)
-
-    fig, axes = plt.subplots(3, 1, figsize=(FIG_W, FIG_H), sharex=True)
-    axes[0].plot(
-        f_input_ref[mask_input],
-        input_ref_db[mask_input],
-        label="Measured first-string displacement near the bridge",
-        color="tab:blue",
-        linewidth=1.1,
-    )
-    axes[0].set_ylabel("Input [dB re peak]")
-    axes[0].set_ylim(-90.0, 3.0)
-    axes[0].grid(True, linestyle=":", alpha=0.6)
-    axes[0].legend(loc="lower left", fontsize=LEGEND_FONTSIZE, frameon=True, framealpha=1.0, facecolor="white", edgecolor="0.85")
-    axes[0].set_title("(a) Input Spectrum", pad=8)
-
-    axes[1].fill_between(
-        f_imp[mask_imp],
-        -120.0,
-        imp_db[mask_imp],
-        color="gray",
-        alpha=0.15,
+    imp_plot_mask = (f_imp <= fmax_plot)
+    axes[0].fill_between(
+        f_imp[imp_plot_mask],
+        SPECTRUM_YMIN,
+        imp_db_sm[imp_plot_mask],
+        color=IMPULSE_FILL_COLOR,
+        alpha=IMPULSE_FILL_ALPHA,
         label="Impulse Response (Membrane Resonance)",
     )
-    axes[1].plot(f_out[mask_out], out_db[mask_out], label="Sound output (FDTD)", color="tab:orange", linewidth=1.5)
-    axes[1].set_ylabel("Response [dB]")
-    axes[1].set_ylim(-120.0, 0.0)
-    axes[1].grid(True, linestyle=":", alpha=0.6)
-    axes[1].legend(loc="lower left", fontsize=LEGEND_FONTSIZE, frameon=True, framealpha=1.0, facecolor="white", edgecolor="0.85")
-    axes[1].set_title("(b) FDTD Response Spectra", pad=8)
 
-    axes[2].plot(f_out[mask_out], delta_rel[mask_out], label=r"Relative enhancement $\Delta_{rel}(f)$", color="tab:green", linewidth=1.5)
-    axes[2].axhline(0.0, linestyle="-", color="gray", linewidth=0.8)
-    axes[2].set_ylabel(r"$\Delta_{rel}(f)$ [dB]")
-    axes[2].set_xlabel("Frequency [Hz]")
-    axes[2].grid(True, linestyle=":", alpha=0.6)
-    axes[2].set_ylim(DELTA_YMIN, DELTA_YMAX)
-    axes[2].legend(loc="lower left", fontsize=LEGEND_FONTSIZE)
-    axes[2].set_title(r"(c) Relative enhancement $\Delta_{rel}(f)$", pad=8)
+    axes[0].plot(f_in, in_db_sm, label="Input (sanshin sound)", color=INPUT_COLOR, linewidth=1.5, alpha=0.8)
+    axes[0].plot(f_out, out_db_sm, label="Output (radiation from the membrane by FDTD)", color=OUTPUT_COLOR, linewidth=1.5)
 
-    for i, mode_freq in enumerate(modes, start=1):
-        if lo < mode_freq < hi:
-            axes[1].axvline(mode_freq, linestyle="--", color="gray", linewidth=1.0, alpha=0.5)
-            axes[2].axvline(mode_freq, linestyle="--", color="gray", linewidth=1.0, alpha=0.5)
-            axes[1].text(
-                mode_freq,
-                0.98,
-                f"M{i}",
-                rotation=90,
-                va="top",
-                ha="right",
-                fontsize=FONT_SIZE_TICK,
-                color="gray",
-                fontweight="bold",
-                transform=axes[1].get_xaxis_transform(),
-            )
+    axes[0].set_ylabel("Magnitude [dB]\n(RMS Normalized)")
+    axes[0].set_ylim(SPECTRUM_YMIN, SPECTRUM_YMAX)
+    axes[0].grid(True, linestyle=":", alpha=GRID_ALPHA)
+    axes[0].legend(loc=LEGEND_LOC, fontsize=LEGEND_FONTSIZE)
 
-    axes[0].set_xlim(lo, hi)
-    fig.tight_layout(rect=TIGHT_RECT)
+    axes[1].plot(f_out, Delta_rel, label=r"Transfer Function $\Delta_{rel}$ (Output / Input)", color=DELTA_COLOR, linewidth=1.5)
+    axes[1].axhline(0.0, linestyle="-", color="gray", linewidth=0.8)
+    axes[1].set_ylabel("Relative Enhancement [dB]")
+    axes[1].set_xlabel("Frequency [Hz]")
+    axes[1].grid(True, linestyle=":", alpha=GRID_ALPHA)
+    axes[1].set_ylim(DELTA_YMIN, DELTA_YMAX)
+    axes[1].legend(loc=LEGEND_LOC, fontsize=LEGEND_FONTSIZE)
+
+    for i, m in enumerate(modes, start=1):
+        if 0 < m < fmax_plot:
+            axes[0].axvline(m, linestyle="--", color="gray", linewidth=1.0, alpha=0.5)
+            axes[1].axvline(m, linestyle="--", color="gray", linewidth=1.0, alpha=0.5)
+            axes[0].text(m, 10, f"M{i}", rotation=90, va="top", ha="right", fontsize=9, color="gray", fontweight="bold")
+
+            f_d, v_d = pick_local_peak(f_out, Delta_rel, m, DELTA_LOCAL_WINDOW_HZ)
+            if f_d is not None and f_d < fmax_plot:
+                axes[1].plot([f_d], [v_d], marker="o", color=MARKER_COLOR, markersize=5)
+                shift_hz = f_d - m
+                label_text = f"Peak\nShift: {shift_hz:+.0f}Hz"
+                place_label_safely(axes[1], x=f_d, y=v_d, text=label_text)
+
+    axes[0].set_xlim(0, fmax_plot)
+    fig.suptitle(f"Spectral Analysis: {CONDITION_NAME}", y=SUPTITLE_Y, fontsize=14)
+    plt.tight_layout(rect=TIGHT_RECT)
     return fig
 
 
-def plot_analysis(
-    imp: VolumeCase,
-    snd: VolumeCase,
-    sound_file: Path | None,
-    out_dir: Path,
-    out_stem: str,
-    fmax_hz: float,
-    smooth_hz: float,
-    zp_factor: int,
-    mode_pairs: str,
-    dpi: int,
-) -> tuple[Path, Path]:
-    plt = require_matplotlib()
-    out_dir.mkdir(parents=True, exist_ok=True)
+# =========================================================
+# 5) メイン処理
+# =========================================================
+def main():
+    print("Loading data...")
+    imp_data, imp_params = load_pkg(FILE_IMPULSE)
+    snd_data, snd_params = load_pkg(FILE_SOUND)
 
-    in_wave = build_gensound_drive(snd.params, len(snd.wave), snd.dt_saved, sound_file)
-    f_in, mag_in, _ = spectrum_mag(in_wave, snd.dt_saved, zp_factor)
+    dt_imp = get_dt_frame(imp_params, imp_data.shape[0])
+    dt_snd = get_dt_frame(snd_params, snd_data.shape[0])
+
+    imp_wave, _, _ = extract_obs_wave(imp_data, imp_params, OBS_DISTANCE_CM)
+    out_wave, _, _ = extract_obs_wave(snd_data, snd_params, OBS_DISTANCE_CM)
+    in_wave = build_sound_input_series(snd_params, nt_saved=len(out_wave), dt_frame=dt_snd)
+
+    f_imp, mag_imp, fs_imp = spectrum_mag(imp_wave, dt_imp)
+    f_out, mag_out, fs_out = spectrum_mag(out_wave, dt_snd)
+    f_in, mag_in, _ = spectrum_mag(in_wave, dt_snd)
+
+    fmax_mode = min(FREQ_MAX_HZ, fs_imp / 2)
+    modes = find_impulse_modes_topk(f_imp, mag_imp, fs_imp, top_k=TOP_K_MODES, fmin=0.0, fmax=fmax_mode)
+    print(f"Modes identified: {[f'{m:.0f} Hz' for m in modes]}")
+
+    print(f"Normalizing by RMS power in range 0-{NORM_FMAX_HZ} Hz...")
     ref_in = calc_rms_ref(f_in, mag_in, NORM_FMAX_HZ)
-    in_db = db20(mag_in, ref_in) + NORM_OFFSET_DB
-    in_db_sm, _, _ = moving_average_hz(in_db, f_in, INPUT_SMOOTH_HZ)
-    f_input_ref, input_ref_db = build_measured_string_spectrum(snd.params, sound_file, INPUT_SMOOTH_HZ, zp_factor)
+    ref_out = calc_rms_ref(f_out, mag_out, NORM_FMAX_HZ)
+    ref_imp = calc_rms_ref(f_imp, mag_imp, NORM_FMAX_HZ)
 
-    fmax_plot = min(fmax_hz, snd.freqs[-1], imp.freqs[-1], f_in[-1])
-    f_out = snd.freqs
-    f_imp = imp.freqs
-    in_db_on_out = np.interp(f_out, f_in, in_db_sm, left=in_db_sm[0], right=in_db_sm[-1])
-    imp_db_on_out = np.interp(f_out, f_imp, imp.db_sm, left=imp.db_sm[0], right=imp.db_sm[-1])
+    in_db = 20.0 * np.log10((mag_in + 1e-30) / ref_in) + NORM_OFFSET_DB
+    out_db = 20.0 * np.log10((mag_out + 1e-30) / ref_out) + NORM_OFFSET_DB
+    imp_db = 20.0 * np.log10((mag_imp + 1e-30) / ref_imp) + NORM_OFFSET_DB
 
-    mag_in_on_out = np.interp(f_out, f_in, mag_in, left=mag_in[0], right=mag_in[-1])
-    h_db = db20(snd.mag, mag_in_on_out)
-    h_db_sm, _, _ = moving_average_hz(h_db, f_out, smooth_hz)
-    base_mask = (f_out >= REL_BASELINE_MIN_HZ) & (f_out <= min(REL_BASELINE_MAX_HZ, fmax_plot))
-    base = float(np.mean(h_db_sm[base_mask])) if np.any(base_mask) else 0.0
-    delta_rel = h_db_sm - base
+    in_db_sm, _, _ = moving_average_hz(in_db, f_in, SMOOTH_HZ)
+    out_db_sm, _, _ = moving_average_hz(out_db, f_out, SMOOTH_HZ)
+    imp_db_sm, _, _ = moving_average_hz(imp_db, f_imp, SMOOTH_HZ)
 
-    modes = theory_mode_freqs(imp.params, mode_pairs)
-    print(f"Theoretical mode frequencies: {[f'{m:.0f} Hz' for m in modes]}")
-    print(f"Baseline removed from H(f): {base:.2f} dB")
+    H_db_abs = 20.0 * np.log10((mag_out + 1e-30) / (mag_in + 1e-30))
+    H_db_abs_sm, _, _ = moving_average_hz(H_db_abs, f_out, SMOOTH_HZ)
 
-    fig = draw_spectrum_figure(
-        plt,
-        f_imp,
-        imp.db_sm,
-        f_input_ref,
-        input_ref_db,
-        f_out,
-        snd.db_sm,
-        delta_rel,
-        modes,
-        (0.0, fmax_plot),
-    )
+    base_mask = (f_out >= REL_BASELINE_MIN_HZ) & (f_out <= min(REL_BASELINE_MAX_HZ, fs_out / 2))
+    base = np.mean(H_db_abs_sm[base_mask]) if np.any(base_mask) else 0.0
+    Delta_rel = H_db_abs_sm - base
+    print(f"Baseline removed: {base:.2f} dB")
 
-    png_path = out_dir / f"{out_stem}.png"
-    csv_path = out_dir / f"{out_stem}.csv"
-    fig.savefig(png_path, dpi=dpi, bbox_inches="tight", pad_inches=SAVE_PAD_IN)
-    plt.close(fig)
-    save_csv(csv_path, f_out, in_db_on_out, snd.db_sm, imp_db_on_out, delta_rel, fmax_plot)
-    return png_path, csv_path
+    fmax_plot = min(FREQ_MAX_HZ, fs_out / 2)
+    fig = plot_results(f_imp, imp_db_sm, f_in, in_db_sm, f_out, out_db_sm, Delta_rel, modes, fmax_plot)
 
+    if SAVE_PNG:
+        plt.savefig(SAVE_NAME, dpi=SAVE_DPI, bbox_inches="tight", pad_inches=SAVE_PAD_IN)
+        print(f"\nSaved figure to: {SAVE_NAME}")
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Compare 15kN impulse and 15kN GenSound-driven output to show emphasized frequency bands."
-    )
-    p.add_argument("--imp-npy", type=Path, default=DEFAULT_IMP_NPY)
-    p.add_argument("--sound-npy", type=Path, default=DEFAULT_SOUND_NPY)
-    p.add_argument("--sound-file", type=Path, default=None)
-    p.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
-    p.add_argument("--out-stem", default="imp_sound_15k_gensound_enhancement")
-    p.add_argument("--radius-m", type=float, default=OBS_RADIUS_M)
-    p.add_argument("--fmax-hz", type=float, default=FREQ_MAX_HZ)
-    p.add_argument("--smooth-hz", type=float, default=SMOOTH_HZ)
-    p.add_argument("--zp-factor", type=int, default=ZERO_PAD_FACTOR)
-    p.add_argument("--mode-pairs", default="1,1;1,3;1,5;1,7")
-    p.add_argument("--dpi", type=int, default=SAVE_DPI)
-    args, _unknown = p.parse_known_args()
-    return args
-
-
-def main() -> None:
-    args = parse_args()
-    print("Loading 15kN impulse and sound data...")
-    imp = load_volume_case(args.imp_npy, args.radius_m, args.zp_factor, args.smooth_hz)
-    snd = load_volume_case(args.sound_npy, args.radius_m, args.zp_factor, args.smooth_hz)
-    png_path, csv_path = plot_analysis(
-        imp=imp,
-        snd=snd,
-        sound_file=args.sound_file,
-        out_dir=args.out_dir,
-        out_stem=args.out_stem,
-        fmax_hz=args.fmax_hz,
-        smooth_hz=args.smooth_hz,
-        zp_factor=args.zp_factor,
-        mode_pairs=args.mode_pairs,
-        dpi=args.dpi,
-    )
-    print(f"saved figure: {png_path}")
-    print(f"saved csv: {csv_path}")
+    if SHOW_FIGURE:
+        plt.show()
+    else:
+        plt.close(fig)
 
 
 if __name__ == "__main__":

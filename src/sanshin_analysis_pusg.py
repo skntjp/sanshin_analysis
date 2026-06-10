@@ -14,10 +14,9 @@ import torch
 
 if "__file__" in globals():
     SCRIPT_DIR = Path(__file__).resolve().parent
-    DEFAULT_OUTPUT_DIR = SCRIPT_DIR.parent / "output"
 else:
     SCRIPT_DIR = Path.cwd().resolve()
-    DEFAULT_OUTPUT_DIR = SCRIPT_DIR / "output"
+DEFAULT_OUTPUT_DIR = SCRIPT_DIR
 
 GPU_DEVICE_IDS = (0,)
 DEVICES = tuple(f"cuda:{idx}" for idx in GPU_DEVICE_IDS)
@@ -133,7 +132,10 @@ def _tension_tag(tension_n_m: float) -> str | None:
     if abs(tension_kn - 15.0) < 1e-9:
         return None
     return f"t{_compact_number(tension_kn)}k"
-
+def _back_tension_ratio_tag(back_tension_ratio: float) -> str | None:
+    if abs(back_tension_ratio - 0.8) < 1e-9:
+        return None
+    return f"btr{_compact_number(back_tension_ratio)}"
 
 def _thickness_tag(thickness_m: float) -> str | None:
     thickness_mm = thickness_m * 1000.0
@@ -151,6 +153,7 @@ def _sim_time_tag(sim_time_sec: float) -> str | None:
 def build_output_stem(
     input_mode: str,
     tension_n_m: float,
+    back_tension_ratio: float,
     thickness_m: float,
     koma_position: str,
     sim_time_sec: float,
@@ -158,6 +161,7 @@ def build_output_stem(
     parts = ["sanshin_force", _source_tag(input_mode)]
     for tag in (
         _tension_tag(tension_n_m),
+        _back_tension_ratio_tag(back_tension_ratio),
         _thickness_tag(thickness_m),
         _koma_tag(koma_position),
         _sim_time_tag(sim_time_sec),
@@ -170,6 +174,7 @@ def build_output_stem(
 OUTPUT_STEM = build_output_stem(
     input_mode=INPUT_MODE,
     tension_n_m=MEMBRANE_TENSION,
+    back_tension_ratio=BACK_TENSION_RATIO,
     thickness_m=MEMBRANE_THICKNESS_M,
     koma_position=KOMA_POSITION,
     sim_time_sec=SIM_TIME,

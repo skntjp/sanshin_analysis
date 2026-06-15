@@ -1274,6 +1274,9 @@ def main():
 
     if args.save_npy:
         np.save(OUTPUT_NPY, np.asarray(volume_frames, dtype=np.float32))
+        OUTPUT_OBS_NPY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_obs_pressure.npy"
+        np.save(OUTPUT_OBS_NPY, histories["obs_pressure"].astype(np.float32))
+        print(f"Saved un-subsampled observation pressure wave to: {OUTPUT_OBS_NPY}")
 
     if args.save_png:
         save_diagnostic_png(

@@ -12,3 +12,9 @@ scikit-learn
 scipy
 torchsummary
 notebook
+
+cached_property
+numpy
+pytest
+sympy
+codepy==2023.1

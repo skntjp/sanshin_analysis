@@ -556,6 +556,7 @@ def save_diagnostic_png(
     pressure_frames: np.ndarray,
     summary: dict,
     koma_position: str,
+    args.impulse_duration_sec,
 ):
     t_ms = t_axis * 1000.0
     dt = float(summary["params"]["dt"])
@@ -565,6 +566,7 @@ def save_diagnostic_png(
     axes[0].plot(t_ms, histories["drive"], color="black")
     axes[0].set_title("drive")
     axes[0].set_ylabel("m")
+    axes[0].set_xlim(0.0 float(impulse_duration_sec) * 1000.0)
 
     axes[1].plot(t_ms, histories["obs_pressure"], color="tab:blue")
     axes[1].set_title("observation pressure")

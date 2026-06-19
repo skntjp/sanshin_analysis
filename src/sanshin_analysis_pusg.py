@@ -60,14 +60,14 @@ SOUND_BRIDGE_FORCE_N = 1.0
 INPUT_MODE = "impulse"
 
 # choices: "ricker", "band_limited_noise", "hann_sine"
-IMPULSE_PROFILE = "ricker"
+IMPULSE_PROFILE = "band_limited_noise"
 IMPULSE_DISPLACEMENT_M = 0.001
 IMPULSE_CENTER_FREQ_HZ = 650.0
 IMPULSE_LOW_FREQ_HZ = 50.0
-IMPULSE_HIGH_FREQ_HZ = 5000.0
-IMPULSE_DELAY_SEC = 0.006
+IMPULSE_HIGH_FREQ_HZ = 3500.0
+IMPULSE_DELAY_SEC = 0.001
 IMPULSE_DURATION_SEC = 0.060
-IMPULSE_FADE_SEC = 0.004
+IMPULSE_FADE_SEC = 0.001
 IMPULSE_RANDOM_SEED = 1234
 
 SOUND_FILE = SCRIPT_DIR.parent / "sound_source" / "GenSound1.txt"
@@ -556,7 +556,7 @@ def save_diagnostic_png(
     pressure_frames: np.ndarray,
     summary: dict,
     koma_position: str,
-    args.impulse_duration_sec,
+    impulse_duration_sec: float,
 ):
     t_ms = t_axis * 1000.0
     dt = float(summary["params"]["dt"])
@@ -566,7 +566,7 @@ def save_diagnostic_png(
     axes[0].plot(t_ms, histories["drive"], color="black")
     axes[0].set_title("drive")
     axes[0].set_ylabel("m")
-    axes[0].set_xlim(0.0 float(impulse_duration_sec) * 1000.0)
+    axes[0].set_xlim(0.0, float(impulse_duration_sec) * 1000.0)
 
     axes[1].plot(t_ms, histories["obs_pressure"], color="tab:blue")
     axes[1].set_title("observation pressure")

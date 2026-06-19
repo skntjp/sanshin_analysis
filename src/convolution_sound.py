@@ -1,8 +1,9 @@
 import json
 from pathlib import Path
+import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import wavfile
-from scipy.signal import resample_poly
+from scipy.signal import resample_poly, spectrogram
 
 # =========================================================
 # 設定
@@ -13,13 +14,18 @@ FILE_IMP_JSON = Path("src/sanshin_force_imp_real_summary.json")
 FILE_STRING_SOUND = Path("sound_source/GenSound1.txt")
 
 # 2) 出力ファイル
-OUTPUT_WAV = Path("src/sanshin_convolved_output_20k_base.wav")
+OUTPUT_WAV = Path("src/sanshin_convolved_44100Hz.wav")
+OUTPUT_SPEC_PNG = Path("src/sanshin_convolved_spectrogram_20k.png")
 
-# 3) 弦の振動データのサンプリングレートおよびターゲットIRサンプリングレート (Hz)
-TARGET_IR_FS = 20000
+# 3) 中間処理のサンプリングレート（弦データのレートに合わせる）
+PROCESSING_FS = 20000
 
-# 4) 最終的なWAVファイルのサンプリングレート (再生互換用)
+# 4) 最終的な出力WAVファイルのサンプリングレート
 FINAL_WAV_FS = 44100
+
+# 5) スペクトログラムのパラメータ
+NPERSEG = 512  # 1フレームのサンプル窓幅（周波数解像度と時間解像度のトレードオフ）
+NOVERLAP = 384  # フレーム間のオーバーラップサンプル数
 
 
 def load_simulation_dt(json_path):
@@ -42,69 +48,101 @@ def main():
     # -----------------------------------------------------
     print("Loading raw files...")
     if not FILE_IMP_NPY.exists() or not FILE_STRING_SOUND.exists():
-        raise FileNotFoundError("入力ファイルが見つかりません。パスを確認してください。")
+        raise FileNotFoundError(
+            "入力ファイルが見つかりません。パスを確認してください。"
+        )
 
-    # インパルス応答のロードとDCオフセット除去
     h_raw = np.load(FILE_IMP_NPY).astype(np.float64)
     h_raw -= np.mean(h_raw)
 
-    # シミュレーションの本来のサンプリングレート (約296kHz〜350kHz)
     dt_sim = load_simulation_dt(FILE_IMP_JSON)
     sim_fs = 1.0 / dt_sim
 
-    # 弦の入力振動データのロード (20kHz)
     x_t = np.loadtxt(FILE_STRING_SOUND, dtype=np.float64)
     x_t -= np.mean(x_t)
-
-    print(f"  Original Simulation FS: {sim_fs:.2f} Hz")
-    print(f"  Original IR Length: {len(h_raw)} samples")
-    print(f"  String Input Length: {len(x_t)} samples")
 
     # -----------------------------------------------------
     # 2. インパルス応答を 20 kHz にダウンサンプリング
     # -----------------------------------------------------
-    print(f"Downsampling Impulse Response to {TARGET_IR_FS} Hz...")
-    gcd_ir = np.gcd(int(round(sim_fs)), TARGET_IR_FS)
-    up_ir = int(TARGET_IR_FS // gcd_ir)
+    print(f"Downsampling Impulse Response to {PROCESSING_FS} Hz...")
+    gcd_ir = np.gcd(int(round(sim_fs)), PROCESSING_FS)
+    up_ir = int(PROCESSING_FS // gcd_ir)
     down_ir = int(round(sim_fs) // gcd_ir)
 
-    # 比率が大きすぎる場合のセーフティガード
     if down_ir > 1000 or up_ir > 1000:
         down_ir = 1000
-        up_ir = int(round(TARGET_IR_FS / sim_fs * 1000))
+        up_ir = int(round(PROCESSING_FS / sim_fs * 1000))
 
-    # ここでIR自体を20kHzに落とす
     h_t = resample_poly(h_raw, up_ir, down_ir)
-    print(f"  Downsampled IR Length: {len(h_t)} samples")
 
     # -----------------------------------------------------
-    # 3. 20 kHz 同士での畳み込み（周波数応答特性の適用）
+    # 3. 20 kHz の時間軸上で高速FFT畳み込み
     # -----------------------------------------------------
-    print("Applying Frequency Response (20kHz Base FFT Convolution)...")
-    # 20kHz同士なので、FFT点数も大幅に削減される
+    print(
+        f"Applying Frequency Response (at {PROCESSING_FS}Hz Grid via FFT Convolution)..."
+    )
     n_fft = len(h_t) + len(x_t) - 1
 
     H_f = np.fft.rfft(h_t, n=n_fft)
     X_f = np.fft.rfft(x_t, n=n_fft)
-
-    # 周波数領域での乗算：Y(f) = H(f) * X(f)
     Y_f = H_f * X_f
-
-    # 時間領域に逆変換：y(t) (サンプリングレートは 20kHz)
     y_t = np.fft.irfft(Y_f, n=n_fft)
 
     # -----------------------------------------------------
-    # 4. オーディオプレイヤー互換のため 44.1 kHz へアップサンプリング
+    # 【新規追加】 4. アップサンプリング前のスペクトログラム描写
     # -----------------------------------------------------
-    print(f"Upsampling final output to audio rate ({FINAL_WAV_FS} Hz)...")
-    gcd_out = np.gcd(TARGET_IR_FS, FINAL_WAV_FS)
+    print("Generating spectrogram for 20kHz convolved signal...")
+
+    # 短時間フーリエ変換 (STFT) によるスペクトログラム計算
+    f_axis, t_axis, Sxx = spectrogram(
+        y_t, fs=PROCESSING_FS, nperseg=NPERSEG, noverlap=NOVERLAP
+    )
+
+    # パワースペクトル密度をデシベル(dB)表現に変換
+    Sxx_db = 10.0 * np.log10(Sxx + 1e-30)
+
+    # 描画処理
+    plt.figure(figsize=(11, 5))
+    # pcolormeshで時間-周波数平面のマッピングを描画
+    pcm = plt.pcolormesh(
+        t_axis, f_axis, Sxx_db, shading="gouraud", cmap="magma", vmin=-100, vmax=0
+    )
+
+    plt.title(
+        f"Spectrogram of Convolved Sound (Before 44.1kHz Resampling)\nSampling Rate: {PROCESSING_FS} Hz",
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.ylabel("Frequency [Hz]", fontsize=10)
+    plt.xlabel("Time [seconds]", fontsize=10)
+
+    # 縦軸の範囲を20kHzのナイキスト周波数（10kHz）までに設定
+    plt.ylim(0, PROCESSING_FS / 2)
+
+    # カラーバーの追加（ダイナミックレンジのインジケータ）
+    cbar = plt.colorbar(pcm, pad=0.02)
+    cbar.set_label("Intensity [dB]", fontsize=10)
+
+    plt.tight_layout()
+
+    # 画像として保存しつつ画面に表示
+    OUTPUT_SPEC_PNG.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(OUTPUT_SPEC_PNG, dpi=300)
+    print(f"  Spectrogram image saved to: {OUTPUT_SPEC_PNG}")
+    plt.show()
+
+    # -----------------------------------------------------
+    # 5. 指定された 44.1 kHz へ正確にアップサンプリング
+    # -----------------------------------------------------
+    print(f"Upsampling final output to target audio rate ({FINAL_WAV_FS} Hz)...")
+    gcd_out = np.gcd(PROCESSING_FS, FINAL_WAV_FS)
     up_out = int(FINAL_WAV_FS // gcd_out)
-    down_out = int(TARGET_IR_FS // gcd_out)
+    down_out = int(PROCESSING_FS // gcd_out)
 
     y_final = resample_poly(y_t, up_out, down_out)
 
     # -----------------------------------------------------
-    # 5. 正規化と16bit WAV書き出し
+    # 6. オーディオ正規化と16bit WAV書き出し
     # -----------------------------------------------------
     y_final -= np.mean(y_final)
     max_val = np.max(np.abs(y_final))
@@ -113,10 +151,9 @@ def main():
 
     audio_data = (y_final * 32767.0).astype(np.int16)
 
-    print(f"Writing WAV file to {OUTPUT_WAV}...")
-    OUTPUT_WAV.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Writing final 44.1kHz WAV to {OUTPUT_WAV}...")
     wavfile.write(OUTPUT_WAV, FINAL_WAV_FS, audio_data)
-    print("Successfully generated output sound!")
+    print("Successfully finished all pipelines!")
 
 
 if __name__ == "__main__":

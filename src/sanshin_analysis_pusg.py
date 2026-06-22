@@ -59,14 +59,15 @@ SOUND_BRIDGE_FORCE_N = 1.0
 # choices: "impulse", "sound"
 INPUT_MODE = "impulse"
 
-# choices: "ricker", "band_limited_noise", "hann_sine"
-IMPULSE_PROFILE = "band_limited_noise"
+# choices: "ricker", "band_limited_noise", "hann_sine", band_limited_sinc"
+#sincの有効幅 at least 2 / fl  [s]
+IMPULSE_PROFILE = "band_limited_sinc"
 IMPULSE_DISPLACEMENT_M = 0.001
 IMPULSE_CENTER_FREQ_HZ = 650.0
-IMPULSE_LOW_FREQ_HZ = 50.0
-IMPULSE_HIGH_FREQ_HZ = 3500.0
-IMPULSE_DELAY_SEC = 0.001
-IMPULSE_DURATION_SEC = 0.060
+IMPULSE_LOW_FREQ_HZ = 230.0
+IMPULSE_HIGH_FREQ_HZ = 5000.0
+IMPULSE_DELAY_SEC = 0.000
+IMPULSE_DURATION_SEC = 0.020
 IMPULSE_FADE_SEC = 0.001
 IMPULSE_RANDOM_SEED = 1234
 
@@ -525,6 +526,28 @@ def prepare_impulse_drive(args, nt: int, dt: float):
                 fade = 0.5 - 0.5 * np.cos(np.linspace(0.0, np.pi, fade_n))
                 wave[:fade_n] *= fade
                 wave[-fade_n:] *= fade[::-1]
+            mx = float(np.max(np.abs(wave))) if wave.size else 0.0
+            if mx > 0.0:
+                drive[start:stop] = (float(args.impulse_displacement) * wave / mx).astype(np.float32)
+    elif profile == "band_limited_sinc":
+        n = max(8, int(round(float(args.impulse_duration_sec) / dt)))
+        start = max(0, int(round(float(args.impulse_delay_sec) / dt)))
+        stop = min(nt, start + n)
+        count = max(0, stop - start)
+        if count > 0:
+            fl = float(args.impulse_low_freq_hz)
+            fh = float(args.impulse_high_freq_hz)
+            idx = np.arange(count, dtype=np.float64)
+            tau = (idx - (count - 1) * 0.5) * dt
+            with np.errstate(divide="ignore", invalid="ignore"):
+                wave = np.where(
+                    tau == 0.0,
+                    2.0 * (fh - fl) * dt, # L'Hôpital: lim_{t->0} = 2(fh-fl)*dt
+                    (np.sin(2.0 * np.pi * fh * tau)
+                      - np.sin(2.0 * np.pi * fl * tau))
+                      / (np.pi * tau),
+                )
+            wave *= np.hanning(count)
             mx = float(np.max(np.abs(wave))) if wave.size else 0.0
             if mx > 0.0:
                 drive[start:stop] = (float(args.impulse_displacement) * wave / mx).astype(np.float32)
@@ -1285,6 +1308,7 @@ def main():
             OUTPUT_PNG_PATH, t_axis, histories,
             front_frames, back_frames, pressure_frames,
             summary, args.koma_position,
+            args.impulse_duration_sec,
         )
     
     # passed, split plane are deleted

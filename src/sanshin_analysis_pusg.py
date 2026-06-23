@@ -939,23 +939,22 @@ def run_simulation(args):
     back_frames = []
     volume_frames = []
 
-    _h = dict(dtype=torch.float32, device=device0)
-    hist_obs_pressure        = torch.zeros(nt, **_h)
-    hist_front_jump          = torch.zeros(nt, **_h)
-    hist_back_jump           = torch.zeros(nt, **_h)
-    hist_front_center_w      = torch.zeros(nt, **_h)
-    hist_back_center_w       = torch.zeros(nt, **_h)
-    hist_front_center_v      = torch.zeros(nt, **_h)
-    hist_back_center_v       = torch.zeros(nt, **_h)
-    hist_coupling_work_total = torch.zeros(nt, **_h)
-    hist_front_total_energy  = torch.zeros(nt, **_h)
-    hist_back_total_energy   = torch.zeros(nt, **_h)
-    hist_acoustic_energy     = torch.zeros(nt, **_h)
+    hist_obs_pressure = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_front_jump = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_back_jump = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_front_center_w = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_back_center_w = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_front_center_v = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_back_center_v = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_coupling_work_total = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_front_total_energy = np.empty(nt, dtype=np.float64)
+    hist_back_total_energy = np.empty(nt, dtype=np.float64)
+    hist_acoustic_energy = np.empty(nt, dtype=np.float64)
 
     cumulative_coupling_work = torch.zeros((), dtype=torch.float32, device=device0)
-    front_energy_last    = torch.zeros(1, **_h)  # .item()不要のままtensor保持
-    back_energy_last     = torch.zeros(1, **_h)
-    acoustic_energy_last = torch.zeros(1, **_h)
+    front_energy_last = 0.0
+    back_energy_last = 0.0
+    acoustic_energy_last = 0.0
     t0 = time.perf_counter()
     last_progress_time = t0
     last_progress_step = 0
@@ -1052,15 +1051,15 @@ def run_simulation(args):
                 front_kin = 0.5 * sigma_s * torch.sum(v_front * v_front) * d_area
                 back_kin  = 0.5 * sigma_s * torch.sum(v_back  * v_back)  * d_area
                 front_pot = membrane_potential_energy_torch(w_front, args.tension, dx, dy)
-                back_pot  = membrane_potential_energy_torch(w_back, args.tension * args.back_tension_ratio, dx, dy)
-                front_energy_last    = front_kin + front_pot                   # ← tensor のまま
-                back_energy_last     = back_kin  + back_pot                    # ← tensor のまま
-                acoustic_energy_last = (
-                    torch.sum((p * p) / (2.0 * K_AIR)) * d_vol
+                back_pot = membrane_potential_energy_torch(w_back, args.tension * args.back_tension_ratio, dx, dy)
+                front_energy_last = float((front_kin + front_pot).item())
+                back_energy_last  = float((back_kin  + back_pot).item())
+                acoustic_energy_last = float(
+                    torch.sum((p * p) / (2.0 * K_AIR)).item() * d_vol
                     + 0.5 * RHO_AIR * d_vol * (
-                        torch.sum(ux * ux) + torch.sum(uy * uy) + torch.sum(uz * uz)
+                        torch.sum(ux * ux).item() + torch.sum(uy * uy).item() + torch.sum(uz * uz).item()
                     )
-                ) 
+                )
 
             hist_obs_pressure[step]         = p[geom["obs_x"], geom["obs_y"], geom["obs_z"]]
             hist_front_jump[step]           = torch.mean(delta_p_front)
@@ -1089,18 +1088,18 @@ def run_simulation(args):
     farfield_surface_meta = finalize_farfield_surface(farfield_surface)
     t_axis = np.arange(nt, dtype=np.float64) * dt
     histories = {
-        "obs_pressure":        hist_obs_pressure.cpu().numpy(),
-        "front_jump":          hist_front_jump.cpu().numpy(),
-        "back_jump":           hist_back_jump.cpu().numpy(),
-        "front_center_w":      hist_front_center_w.cpu().numpy(),
-        "back_center_w":       hist_back_center_w.cpu().numpy(),
-        "front_center_v":      hist_front_center_v.cpu().numpy(),
-        "back_center_v":       hist_back_center_v.cpu().numpy(),
-        "drive":               drive_tensor.cpu().numpy(),
-        "coupling_work_total": hist_coupling_work_total.cpu().numpy(),
-        "front_total_energy":  hist_front_total_energy.cpu().numpy(),
-        "back_total_energy":   hist_back_total_energy.cpu().numpy(),
-        "acoustic_energy":     hist_acoustic_energy.cpu().numpy(),
+        "drive":               np.asarray(drive_np, dtype=np.float64),
+        "obs_pressure":        hist_obs_pressure.detach().cpu().numpy().astype(np.float64),
+        "front_jump":          hist_front_jump.detach().cpu().numpy().astype(np.float64),
+        "back_jump":           hist_back_jump.detach().cpu().numpy().astype(np.float64),
+        "front_center_w":      hist_front_center_w.detach().cpu().numpy().astype(np.float64),
+        "back_center_w":       hist_back_center_w.detach().cpu().numpy().astype(np.float64),
+        "front_center_v":      hist_front_center_v.detach().cpu().numpy().astype(np.float64),
+        "back_center_v":       hist_back_center_v.detach().cpu().numpy().astype(np.float64),
+        "front_total_energy":  hist_front_total_energy,
+        "back_total_energy":   hist_back_total_energy,
+        "acoustic_energy":     hist_acoustic_energy,
+        "coupling_work_total": hist_coupling_work_total.detach().cpu().numpy().astype(np.float64),
     }
 
     summary = {

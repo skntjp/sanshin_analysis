@@ -6,11 +6,12 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
+import zarr
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-DEFAULT_NPY_A = SCRIPT_DIR / "sanshin_force_imp_real.npy"
-DEFAULT_NPY_B = SCRIPT_DIR / "sanshin_force_imp_t10k_real.npy"
+DEFAULT_NPY_A = SCRIPT_DIR / "sanshin_force_imp_real.zarr"
+DEFAULT_NPY_B = SCRIPT_DIR / "sanshin_force_imp_t10k_real.zarr"
 DEFAULT_OUT_DIR = SCRIPT_DIR
 DEFAULT_OUT_DIR_PEAK = SCRIPT_DIR
 DEFAULT_FREQUENCY_MODE = "mode"
@@ -106,25 +107,12 @@ def load_histories_sidecar(path: Path) -> dict:
     return {}
 
 
+# 変更後
 def load_package(path: Path):
-    try:
-        loaded = np.load(path, mmap_mode="r", allow_pickle=False)
-        params, analysis, summary, _sidecar = load_summary_sidecar(path)
-        histories = load_histories_sidecar(path)
-        return loaded, params, analysis, summary, np.asarray([], dtype=np.float64), histories
-    except ValueError:
-        loaded = np.load(path, allow_pickle=True)
-    if getattr(loaded, "shape", None) == ():
-        pkg = loaded.item()
-        data = pkg["data"]
-        params = dict(pkg.get("params", {}))
-        analysis = dict(pkg.get("analysis", {}))
-        summary = dict(pkg.get("summary", {}))
-        t = np.asarray(pkg.get("t", []), dtype=np.float64)
-        histories = {key: np.asarray(value) for key, value in pkg.items() if key.startswith("hist_")}
-        return data, params, analysis, summary, t, histories
+    loaded = zarr.open(str(path), mode="r")
     params, analysis, summary, _sidecar = load_summary_sidecar(path)
-    return loaded, params, analysis, summary, np.asarray([], dtype=np.float64), {}
+    histories = load_histories_sidecar(path)
+    return loaded, params, analysis, summary, np.asarray([], dtype=np.float64), histories
 
 
 def saved_dt(params: dict, t: np.ndarray, nt_saved: int) -> float:
@@ -367,8 +355,8 @@ def load_farfield_surface_package(meta_path: Path):
     package = {
         "meta_path": meta_path,
         "meta": payload,
-        "p": np.load(p_path, mmap_mode="r"),
-        "un": np.load(un_path, mmap_mode="r"),
+        "p": zarr.open(str(p_path), mode="r"),
+        "un": zarr.open(str(un_path), mode="r"),
         "coords": coords,
         "normals": normals,
         "geometry_rebuilt": bool(geometry_rebuilt),
@@ -559,18 +547,14 @@ def parse_freqs(text: str | None) -> list[float] | None:
     return freqs
 
 
-def load_case(npy_path: Path):
-    if not npy_path.exists():
-        raise FileNotFoundError(npy_path)
-    data, params, _analysis, _summary, t, _histories = pu.load_package(npy_path)
-    if data.ndim != 4:
-        raise ValueError(f"expected (time,x,y,z), got {data.shape}")
-    dt = pu.saved_dt(params, t, int(data.shape[0]))
-    return data, params, dt
+def load_case(zarr_path: Path):
+    if not zarr_path.exists():
+        raise FileNotFoundError(zarr_path)
+    data, params, _analysis, _summary, t, _histories = pu.load_package(zarr_path)
 
 
-def load_params(npy_path: Path) -> dict:
-    _data, params, _analysis, _summary, _t, _histories = pu.load_package(npy_path)
+def load_params(zarr_path: Path) -> dict:
+    _data, params, _analysis, _summary, _t, _histories = pu.load_package(zarr_path)
     return params
 
 

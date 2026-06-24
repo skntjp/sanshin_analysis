@@ -10,6 +10,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import zarr
+from numcodecs import Blosc
 
 
 if "__file__" in globals():
@@ -33,7 +35,7 @@ DY = 0.002
 DZ = 0.002
 COURANT = 0.85
 SANSHIN_BOX_REFERENCE_COURANT = 0.99
-SIM_TIME = 0.30
+SIM_TIME = 3.0
 
 PML_WIDTH = 50
 PML_STRENGTH = 0.04
@@ -57,21 +59,21 @@ KOMA_FORCE_SCALE = 1000.0
 SOUND_BRIDGE_FORCE_N = 1.0
 
 # choices: "impulse", "sound"
-INPUT_MODE = "impulse"
+INPUT_MODE = "sound"
 
 # choices: "ricker", "band_limited_noise", "hann_sine", band_limited_sinc"
 #sincの有効幅 at least 2 / fl  [s]
-IMPULSE_PROFILE = "band_limited_sinc"
+IMPULSE_PROFILE = "ricker"
 IMPULSE_DISPLACEMENT_M = 0.001
 IMPULSE_CENTER_FREQ_HZ = 650.0
 IMPULSE_LOW_FREQ_HZ = 230.0
 IMPULSE_HIGH_FREQ_HZ = 5000.0
 IMPULSE_DELAY_SEC = 0.000
-IMPULSE_DURATION_SEC = 0.020
+IMPULSE_DURATION_SEC = 0.060
 IMPULSE_FADE_SEC = 0.001
 IMPULSE_RANDOM_SEED = 1234
 
-SOUND_FILE = SCRIPT_DIR.parent / "sound_source" / "GenSound1.txt"
+SOUND_FILE = SCRIPT_DIR.parent / "sound_source" / "GenSound2.txt"
 SOUND_SAMPLE_RATE_HZ = 20000.0
 SOUND_GAIN = 0.0005
 # choices: True, False
@@ -769,12 +771,13 @@ def build_farfield_surface_layout(args, geom: dict, nt: int, dt: float) -> dict:
     coords_np = np.asarray(coords, dtype=np.float32)
     normals_np = np.asarray(normals, dtype=np.float32)
     OUTPUT_FARFIELD_SURFACE.parent.mkdir(parents=True, exist_ok=True)
-    p_path = OUTPUT_FARFIELD_SURFACE.with_name(OUTPUT_FARFIELD_SURFACE.stem + "_p.npy")
-    un_path = OUTPUT_FARFIELD_SURFACE.with_name(OUTPUT_FARFIELD_SURFACE.stem + "_un.npy")
+    _ff_compressor = Blosc(cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE)
+    p_path = OUTPUT_FARFIELD_SURFACE.with_name(OUTPUT_FARFIELD_SURFACE.stem + "_p.zarr")
+    un_path = OUTPUT_FARFIELD_SURFACE.with_name(OUTPUT_FARFIELD_SURFACE.stem + "_un.zarr")
     coords_path = OUTPUT_FARFIELD_SURFACE.with_name(OUTPUT_FARFIELD_SURFACE.stem + "_coords.npy")
     normals_path = OUTPUT_FARFIELD_SURFACE.with_name(OUTPUT_FARFIELD_SURFACE.stem + "_normals.npy")
-    p_mem = np.lib.format.open_memmap(p_path, mode="w+", dtype=np.float32, shape=(nframes, coords_np.shape[0]))
-    un_mem = np.lib.format.open_memmap(un_path, mode="w+", dtype=np.float32, shape=(nframes, coords_np.shape[0]))
+    p_mem = zarr.open(str(p_path), mode="w", shape=(nframes, coords_np.shape[0]), dtype=np.float32, chunks=(16, coords_np.shape[0]), compressor=_ff_compressor)
+    un_mem = zarr.open(str(un_path), mode="w", shape=(nframes, coords_np.shape[0]), dtype=np.float32, chunks=(16, coords_np.shape[0]), compressor=_ff_compressor)
     meta = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "purpose": "far-field closed-surface pressure and outward normal velocity output",
@@ -854,8 +857,6 @@ def write_farfield_surface_frame(layout, step: int, p_before: np.ndarray, p_afte
 def finalize_farfield_surface(layout):
     if layout is None:
         return None
-    layout["p"].flush()
-    layout["un"].flush()
     layout["meta"]["frames_written"] = int(layout["frame_cursor"])
     layout["meta_path"].write_text(json.dumps(layout["meta"], indent=2), encoding="utf-8")
     return layout["meta"]
@@ -1298,10 +1299,16 @@ def main():
     summary, histories, front_frames, back_frames, pressure_frames, volume_frames, t_axis = run_simulation(args)
 
     if args.save_npy:
-        np.save(OUTPUT_NPY, np.asarray(volume_frames, dtype=np.float32))
-        OUTPUT_OBS_NPY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_obs_pressure.npy"
-        np.save(OUTPUT_OBS_NPY, histories["obs_pressure"].astype(np.float32))
-        print(f"Saved un-subsampled observation pressure wave to: {OUTPUT_OBS_NPY}")
+        _vol_arr = np.asarray(volume_frames, dtype=np.float32)
+    _vol_compressor = Blosc(cname="zstd", clevel=5, shuffle=Blosc.BITSHUFFLE)
+    OUTPUT_ZARR = OUTPUT_NPY.with_suffix(".zarr")
+    _z = zarr.open(str(OUTPUT_ZARR), mode="w", shape=_vol_arr.shape, dtype=np.float32, chunks=(1, _vol_arr.shape[1], _vol_arr.shape[2], _vol_arr.shape[3]), compressor=_vol_compressor)
+    _z[:] = _vol_arr
+    print(f"Saved volume frames to: {OUTPUT_ZARR}")
+
+    OUTPUT_OBS_NPY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_obs_pressure.npy"
+    np.save(OUTPUT_OBS_NPY, histories["obs_pressure"].astype(np.float32))
+    print(f"Saved un-subsampled observation pressure wave to: {OUTPUT_OBS_NPY}")
 
     if args.save_png:
         save_diagnostic_png(

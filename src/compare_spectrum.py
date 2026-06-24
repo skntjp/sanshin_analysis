@@ -1,6 +1,7 @@
 ﻿import numpy as np
 import matplotlib.pyplot as plt
 import json
+import zarr
 from pathlib import Path
 from scipy.signal import find_peaks
 
@@ -10,8 +11,8 @@ from scipy.signal import find_peaks
 # =========================================================
 CONDITION_NAME = "tension ratio 1.0, -"
 
-FILE_IMPULSE = "src/sanshin_force_imp_btr1_real.npy"
-FILE_SOUND = "src/sanshin_force_sound_btr1_real.npy"
+FILE_IMPULSE = "src/sanshin_force_imp_btr1_real_s0p003.zarr"
+FILE_SOUND = "src/sanshin_force_sound_btr1_real_s0p003.zarr"
 DEFAULT_SOUND_FILE = "sound_source/GenSound1.txt"
 
 OBS_DISTANCE_CM = 30.0
@@ -63,22 +64,14 @@ def load_pkg(path_str):
     path = Path(path_str)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
-    loaded = np.load(path, allow_pickle=True)
-    
-    # 1) 元のパッケージ型（辞書型）での読み込みを試みる
-    if loaded.shape == ():
-        pkg = loaded.item()
-        return pkg["data"], pkg.get("params", {})
-        
-    # 2) 純粋な配列だった場合、同名の _summary.json から params を探す
+    loaded = np.asarray(zarr.open(str(path), mode="r"))
+
     params = {}
     json_path = path.with_name(path.stem + "_summary.json")
-    
     if json_path.exists():
         try:
             with open(json_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
-                # sanshin_analysis_pusg.py の出力構造に対応
                 if "summary" in meta and "params" in meta["summary"]:
                     params = meta["summary"]["params"]
                 elif "params" in meta:
@@ -88,7 +81,6 @@ def load_pkg(path_str):
             print(f"Warning: Failed to load JSON parameters from {json_path}: {e}")
     else:
         print(f"Warning: Summary JSON not found at {json_path}. Parameters will be empty.")
-            
     return loaded, params
 
 

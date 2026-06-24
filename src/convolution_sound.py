@@ -3,7 +3,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import wavfile
-from scipy.signal import resample_poly, spectrogram
+from scipy.signal import butter, filtfilt, resample_poly, spectrogram
 
 # =========================================================
 # 設定
@@ -14,8 +14,8 @@ FILE_IMP_JSON = Path("src/sanshin_force_imp_real_summary.json")
 FILE_STRING_SOUND = Path("sound_source/GenSound1.txt")
 
 # 2) 出力ファイル
-OUTPUT_WAV = Path("src/sanshin_convolved_44100Hz.wav")
-OUTPUT_SPEC_PNG = Path("src/sanshin_convolved_spectrogram_20k.png")
+OUTPUT_WAV = Path("src/sanshin_convolved_lpf_44100Hz.wav")
+OUTPUT_SPEC_PNG = Path("src/sanshin_convolved_spectrogram_lpf_20k.png")
 
 # 3) 中間処理のサンプリングレート（弦データのレートに合わせる）
 PROCESSING_FS = 20000
@@ -23,9 +23,13 @@ PROCESSING_FS = 20000
 # 4) 最終的な出力WAVファイルのサンプリングレート
 FINAL_WAV_FS = 44100
 
-# 5) スペクトログラムのパラメータ
-NPERSEG = 512  # 1フレームのサンプル窓幅（周波数解像度と時間解像度のトレードオフ）
-NOVERLAP = 384  # フレーム間のオーバーラップサンプル数
+# 5) 【新規】ローパスフィルタ設定
+LPF_CUTOFF_HZ = 3000.0  # カットオフ周波数
+LPF_ORDER = 6  # フィルタの次数（大きいほど急峻にカットされます）
+
+# 6) スペクトログラムのパラメータ
+NPERSEG = 512
+NOVERLAP = 384
 
 
 def load_simulation_dt(json_path):
@@ -42,9 +46,19 @@ def load_simulation_dt(json_path):
         return float(params["dt"])
 
 
+def butter_lowpass_filter(data, cutoff, fs, order=5):
+    """位相ズレのないデジタルローパスフィルタを適用する"""
+    nyq = 0.5 * fs  # ナイキスト周波数（20kHzサンプリングなら10kHz）
+    normal_cutoff = cutoff / nyq  # 正規化カットオフ周波数 (0.0 〜 1.0)
+    b, a = butter(order, normal_cutoff, btype="low", analog=False)
+    # filtfiltを使うことで、前方向・後ろ方向の双方向からフィルタをかけ、時間遅延をゼロにする
+    y = filtfilt(b, a, data)
+    return y
+
+
 def main():
     # -----------------------------------------------------
-    # 1. データのロードと初期サンプリングレートの確認
+    # 1. データのロード
     # -----------------------------------------------------
     print("Loading raw files...")
     if not FILE_IMP_NPY.exists() or not FILE_STRING_SOUND.exists():
@@ -58,11 +72,22 @@ def main():
     dt_sim = load_simulation_dt(FILE_IMP_JSON)
     sim_fs = 1.0 / dt_sim
 
-    x_t = np.loadtxt(FILE_STRING_SOUND, dtype=np.float64)
-    x_t -= np.mean(x_t)
+    # 弦の入力振動データ（20kHz）のロード
+    x_raw = np.loadtxt(FILE_STRING_SOUND, dtype=np.float64)
+    x_raw -= np.mean(x_raw)
 
     # -----------------------------------------------------
-    # 2. インパルス応答を 20 kHz にダウンサンプリング
+    # 【新規追加】 2. 入力信号に 3000Hz ローパスフィルタを適用
+    # -----------------------------------------------------
+    print(
+        f"Applying {LPF_CUTOFF_HZ}Hz Low-Pass Filter to string input (GenSound1)..."
+    )
+    x_t = butter_lowpass_filter(
+        x_raw, cutoff=LPF_CUTOFF_HZ, fs=PROCESSING_FS, order=LPF_ORDER
+    )
+
+    # -----------------------------------------------------
+    # 3. インパルス応答を 20 kHz にダウンサンプリング
     # -----------------------------------------------------
     print(f"Downsampling Impulse Response to {PROCESSING_FS} Hz...")
     gcd_ir = np.gcd(int(round(sim_fs)), PROCESSING_FS)
@@ -76,7 +101,7 @@ def main():
     h_t = resample_poly(h_raw, up_ir, down_ir)
 
     # -----------------------------------------------------
-    # 3. 20 kHz の時間軸上で高速FFT畳み込み
+    # 4. 20 kHz の時間軸上で高速FFT畳み込み
     # -----------------------------------------------------
     print(
         f"Applying Frequency Response (at {PROCESSING_FS}Hz Grid via FFT Convolution)..."
@@ -89,50 +114,49 @@ def main():
     y_t = np.fft.irfft(Y_f, n=n_fft)
 
     # -----------------------------------------------------
-    # 【新規追加】 4. アップサンプリング前のスペクトログラム描写
+    # 5. アップサンプリング前のスペクトログラム描写
     # -----------------------------------------------------
     print("Generating spectrogram for 20kHz convolved signal...")
-
-    # 短時間フーリエ変換 (STFT) によるスペクトログラム計算
     f_axis, t_axis, Sxx = spectrogram(
         y_t, fs=PROCESSING_FS, nperseg=NPERSEG, noverlap=NOVERLAP
     )
-
-    # パワースペクトル密度をデシベル(dB)表現に変換
     Sxx_db = 10.0 * np.log10(Sxx + 1e-30)
 
-    # 描画処理
     plt.figure(figsize=(11, 5))
-    # pcolormeshで時間-周波数平面のマッピングを描画
     pcm = plt.pcolormesh(
         t_axis, f_axis, Sxx_db, shading="gouraud", cmap="magma", vmin=-100, vmax=0
     )
 
     plt.title(
-        f"Spectrogram of Convolved Sound (Before 44.1kHz Resampling)\nSampling Rate: {PROCESSING_FS} Hz",
+        f"Spectrogram of Convolved Sound (With {LPF_CUTOFF_HZ}Hz LPF on Input)\nSampling Rate: {PROCESSING_FS} Hz",
         fontsize=12,
         fontweight="bold",
     )
     plt.ylabel("Frequency [Hz]", fontsize=10)
     plt.xlabel("Time [seconds]", fontsize=10)
+    plt.ylim(0, PROCESSING_FS / 2)  # 10kHzまで表示
 
-    # 縦軸の範囲を20kHzのナイキスト周波数（10kHz）までに設定
-    plt.ylim(0, PROCESSING_FS / 2)
+    # 3000Hzの位置にカットオフを示す補助線を引く
+    plt.axhline(
+        LPF_CUTOFF_HZ,
+        color="white",
+        linestyle="--",
+        alpha=0.6,
+        label=f"LPF Cutoff ({LPF_CUTOFF_HZ}Hz)",
+    )
+    plt.legend(loc="upper right")
 
-    # カラーバーの追加（ダイナミックレンジのインジケータ）
     cbar = plt.colorbar(pcm, pad=0.02)
     cbar.set_label("Intensity [dB]", fontsize=10)
 
     plt.tight_layout()
-
-    # 画像として保存しつつ画面に表示
     OUTPUT_SPEC_PNG.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(OUTPUT_SPEC_PNG, dpi=300)
     print(f"  Spectrogram image saved to: {OUTPUT_SPEC_PNG}")
     plt.show()
 
     # -----------------------------------------------------
-    # 5. 指定された 44.1 kHz へ正確にアップサンプリング
+    # 6. 指定された 44.1 kHz へ正確にアップサンプリング
     # -----------------------------------------------------
     print(f"Upsampling final output to target audio rate ({FINAL_WAV_FS} Hz)...")
     gcd_out = np.gcd(PROCESSING_FS, FINAL_WAV_FS)
@@ -142,7 +166,7 @@ def main():
     y_final = resample_poly(y_t, up_out, down_out)
 
     # -----------------------------------------------------
-    # 6. オーディオ正規化と16bit WAV書き出し
+    # 7. オーディオ正規化と16bit WAV書き出し
     # -----------------------------------------------------
     y_final -= np.mean(y_final)
     max_val = np.max(np.abs(y_final))
@@ -153,7 +177,7 @@ def main():
 
     print(f"Writing final 44.1kHz WAV to {OUTPUT_WAV}...")
     wavfile.write(OUTPUT_WAV, FINAL_WAV_FS, audio_data)
-    print("Successfully finished all pipelines!")
+    print("Successfully finished all pipelines with LPF constraint!")
 
 
 if __name__ == "__main__":

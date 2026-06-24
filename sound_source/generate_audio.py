@@ -57,7 +57,7 @@ def plot_spectrogram(audio_data, sample_rate):
     plt.show()
 
 if __name__ == "__main__":
-    txt_file = "GenSound1.txt"
+    txt_file = "GenSound2.txt"
     wav_file = "string_vibration.wav"
     
     # 一般的なサンプリングレート（44100Hz）で生成

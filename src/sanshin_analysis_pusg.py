@@ -59,9 +59,9 @@ SOUND_BRIDGE_FORCE_N = 1.0
 # choices: "impulse", "sound"
 INPUT_MODE = "impulse"
 
-# choices: "ricker", "band_limited_noise", "hann_sine", band_limited_sinc"
+# choices: "delta", "ricker", "band_limited_noise", "hann_sine", band_limited_sinc"
 #sincの有効幅 at least 2 / fl  [s]
-IMPULSE_PROFILE = "ricker"
+IMPULSE_PROFILE = "delta"
 IMPULSE_DISPLACEMENT_M = 0.001
 IMPULSE_CENTER_FREQ_HZ = 463.899
 IMPULSE_LOW_FREQ_HZ = 50.0
@@ -480,6 +480,11 @@ def prepare_impulse_drive(args, nt: int, dt: float):
 
     if profile == "single_step":
         drive[0] = float(args.impulse_displacement)
+
+    elif profile == "delta":
+        idx = int(round(float(args.impulse_delay_sec) / dt))
+        if 0 <= idx < nt:
+            drive[idx] = float(args.impulse_displacement)
 
     elif profile == "ricker":
         t = np.arange(nt, dtype=np.float64) * dt

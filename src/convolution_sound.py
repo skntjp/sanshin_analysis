@@ -9,13 +9,15 @@ from scipy.signal import butter, filtfilt, resample_poly, spectrogram
 # 設定
 # =========================================================
 # 1) 入力ファイル
-FILE_IMP_NPY = Path("src/sanshin_force_imp_real_obs_pressure.npy")
-FILE_IMP_JSON = Path("src/sanshin_force_imp_real_summary.json")
-FILE_STRING_SOUND = Path("sound_source/GenSound1.txt")
+FILE_IMP_NPY = Path("src/sanshin_force_imp_real_s1p2_obs_pressure.npy")
+FILE_IMP_JSON = Path("src/sanshin_force_imp_real_s1p2_summary.json")
+FILE_STRING_SOUND = Path("sound_source/GenSound2.txt")
 
 # 2) 出力ファイル
 OUTPUT_WAV = Path("src/sanshin_convolved_lpf_44100Hz.wav")
 OUTPUT_SPEC_PNG = Path("src/sanshin_convolved_spectrogram_lpf_20k.png")
+OUTPUT_WAVEFORM_PNG = Path("src/sanshin_convolved_waveform_lpf_20k.png")
+OUTPUT_SPECTRUM_PNG = Path("src/sanshin_convolved_spectrum_lpf_20k.png")
 
 # 3) 中間処理のサンプリングレート（弦データのレートに合わせる）
 PROCESSING_FS = 20000
@@ -24,6 +26,7 @@ PROCESSING_FS = 20000
 FINAL_WAV_FS = 44100
 
 # 5) 【新規】ローパスフィルタ設定
+USE_LPF = False  # True: ローパスフィルタを適用 / False: 適用しない
 LPF_CUTOFF_HZ = 3000.0  # カットオフ周波数
 LPF_ORDER = 6  # フィルタの次数（大きいほど急峻にカットされます）
 
@@ -77,14 +80,18 @@ def main():
     x_raw -= np.mean(x_raw)
 
     # -----------------------------------------------------
-    # 【新規追加】 2. 入力信号に 3000Hz ローパスフィルタを適用
+    # 【新規追加】 2. 入力信号に 3000Hz ローパスフィルタを適用（USE_LPFで切替）
     # -----------------------------------------------------
-    print(
-        f"Applying {LPF_CUTOFF_HZ}Hz Low-Pass Filter to string input (GenSound1)..."
-    )
-    x_t = butter_lowpass_filter(
-        x_raw, cutoff=LPF_CUTOFF_HZ, fs=PROCESSING_FS, order=LPF_ORDER
-    )
+    if USE_LPF:
+        print(
+            f"Applying {LPF_CUTOFF_HZ}Hz Low-Pass Filter to string input (GenSound1)..."
+        )
+        x_t = butter_lowpass_filter(
+            x_raw, cutoff=LPF_CUTOFF_HZ, fs=PROCESSING_FS, order=LPF_ORDER
+        )
+    else:
+        print("Low-Pass Filter disabled (USE_LPF=False). Using raw string input...")
+        x_t = x_raw
 
     # -----------------------------------------------------
     # 3. インパルス応答を 20 kHz にダウンサンプリング
@@ -122,13 +129,18 @@ def main():
     )
     Sxx_db = 10.0 * np.log10(Sxx + 1e-30)
 
+    # タイトル用のLPF状態ラベル
+    lpf_label = (
+        f"With {LPF_CUTOFF_HZ}Hz LPF on Input" if USE_LPF else "No LPF"
+    )
+
     plt.figure(figsize=(11, 5))
     pcm = plt.pcolormesh(
         t_axis, f_axis, Sxx_db, shading="gouraud", cmap="magma", vmin=-100, vmax=0
     )
 
     plt.title(
-        f"Spectrogram of Convolved Sound (With {LPF_CUTOFF_HZ}Hz LPF on Input)\nSampling Rate: {PROCESSING_FS} Hz",
+        f"Spectrogram of Convolved Sound ({lpf_label})\nSampling Rate: {PROCESSING_FS} Hz",
         fontsize=12,
         fontweight="bold",
     )
@@ -136,15 +148,16 @@ def main():
     plt.xlabel("Time [seconds]", fontsize=10)
     plt.ylim(0, PROCESSING_FS / 2)  # 10kHzまで表示
 
-    # 3000Hzの位置にカットオフを示す補助線を引く
-    plt.axhline(
-        LPF_CUTOFF_HZ,
-        color="white",
-        linestyle="--",
-        alpha=0.6,
-        label=f"LPF Cutoff ({LPF_CUTOFF_HZ}Hz)",
-    )
-    plt.legend(loc="upper right")
+    # 3000Hzの位置にカットオフを示す補助線を引く（LPF有効時のみ）
+    if USE_LPF:
+        plt.axhline(
+            LPF_CUTOFF_HZ,
+            color="white",
+            linestyle="--",
+            alpha=0.6,
+            label=f"LPF Cutoff ({LPF_CUTOFF_HZ}Hz)",
+        )
+        plt.legend(loc="upper right")
 
     cbar = plt.colorbar(pcm, pad=0.02)
     cbar.set_label("Intensity [dB]", fontsize=10)
@@ -153,6 +166,62 @@ def main():
     OUTPUT_SPEC_PNG.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(OUTPUT_SPEC_PNG, dpi=300)
     print(f"  Spectrogram image saved to: {OUTPUT_SPEC_PNG}")
+    plt.show()
+
+    # -----------------------------------------------------
+    # 5-2. 波形（時間変化）の描写
+    # -----------------------------------------------------
+    print("Generating waveform (time-domain) plot for 20kHz convolved signal...")
+    t_wave = np.arange(len(y_t)) / PROCESSING_FS
+
+    plt.figure(figsize=(11, 4))
+    plt.plot(t_wave, y_t, color="tab:blue", linewidth=0.6)
+    plt.title(
+        f"Waveform of Convolved Sound ({lpf_label})\nSampling Rate: {PROCESSING_FS} Hz",
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.xlabel("Time [seconds]", fontsize=10)
+    plt.ylabel("Amplitude", fontsize=10)
+    plt.xlim(0, t_wave[-1])
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_WAVEFORM_PNG, dpi=300)
+    print(f"  Waveform image saved to: {OUTPUT_WAVEFORM_PNG}")
+    plt.show()
+
+    # -----------------------------------------------------
+    # 5-3. スペクトル（周波数特性）の描写
+    # -----------------------------------------------------
+    print("Generating spectrum (frequency-domain) plot for 20kHz convolved signal...")
+    n_spec = len(y_t)
+    spec = np.abs(np.fft.rfft(y_t)) / n_spec
+    freqs = np.fft.rfftfreq(n_spec, d=1.0 / PROCESSING_FS)
+    spec_db = 20.0 * np.log10(spec + 1e-30)
+
+    plt.figure(figsize=(11, 4))
+    plt.plot(freqs, spec_db, color="tab:red", linewidth=0.7)
+    plt.title(
+        f"Spectrum of Convolved Sound ({lpf_label})\nSampling Rate: {PROCESSING_FS} Hz",
+        fontsize=12,
+        fontweight="bold",
+    )
+    plt.xlabel("Frequency [Hz]", fontsize=10)
+    plt.ylabel("Magnitude [dB]", fontsize=10)
+    plt.xlim(0, PROCESSING_FS / 2)
+    if USE_LPF:
+        plt.axvline(
+            LPF_CUTOFF_HZ,
+            color="black",
+            linestyle="--",
+            alpha=0.6,
+            label=f"LPF Cutoff ({LPF_CUTOFF_HZ}Hz)",
+        )
+        plt.legend(loc="upper right")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_SPECTRUM_PNG, dpi=300)
+    print(f"  Spectrum image saved to: {OUTPUT_SPECTRUM_PNG}")
     plt.show()
 
     # -----------------------------------------------------

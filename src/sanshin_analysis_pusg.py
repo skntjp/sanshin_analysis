@@ -49,6 +49,12 @@ BACK_MEMBRANE_DAMPING = 10.0
 
 BRIDGE_WIDTH_M = 0.016
 
+# 心 (棹が胴内部を貫通する部分). 全反射の剛体として扱う
+# choices: True, False
+ENABLE_SHIN = True
+SHIN_X_M = 50e-3
+SHIN_Z_M = 40e-3
+
 # choices: "center", "real"
 KOMA_POSITION = "real"
 
@@ -145,6 +151,12 @@ def _thickness_tag(thickness_m: float) -> str | None:
     return f"h{_compact_number(thickness_mm)}mm"
 
 
+def _shin_tag(enable_shin: bool, shin_x_m: float, shin_z_m: float) -> str | None:
+    if not enable_shin:
+        return None
+    return f"shin{_compact_number(shin_x_m * 1000.0)}x{_compact_number(shin_z_m * 1000.0)}mm"
+
+
 def _sim_time_tag(sim_time_sec: float) -> str | None:
     if abs(sim_time_sec - 0.3) < 1e-9:
         return None
@@ -158,6 +170,9 @@ def build_output_stem(
     thickness_m: float,
     koma_position: str,
     sim_time_sec: float,
+    enable_shin: bool,
+    shin_x_m: float,
+    shin_z_m: float,
 ) -> str:
     parts = ["sanshin_force", _source_tag(input_mode)]
     for tag in (
@@ -165,6 +180,7 @@ def build_output_stem(
         _back_tension_ratio_tag(back_tension_ratio),
         _thickness_tag(thickness_m),
         _koma_tag(koma_position),
+        _shin_tag(enable_shin, shin_x_m, shin_z_m),
         _sim_time_tag(sim_time_sec),
     ):
         if tag:
@@ -179,6 +195,9 @@ OUTPUT_STEM = build_output_stem(
     thickness_m=MEMBRANE_THICKNESS_M,
     koma_position=KOMA_POSITION,
     sim_time_sec=SIM_TIME,
+    enable_shin=ENABLE_SHIN,
+    shin_x_m=SHIN_X_M,
+    shin_z_m=SHIN_Z_M,
 )
 OUTPUT_NPY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}.npy"
 OUTPUT_JSON_PATH = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_summary.json"
@@ -327,7 +346,18 @@ def centered_patch(total_cells: int, patch_cells: int):
     return start, end
 
 
-def build_geometry(nx, ny, nz, dx, dy, dz, membrane_size_m, body_depth_m, koma_position="center"):
+def centered_span(lo: int, hi: int, cells: int):
+    cells = max(1, int(cells))
+    if cells > hi - lo:
+        raise ValueError("span is too large for the available region")
+    start = lo + (hi - lo - cells) // 2
+    return start, start + cells
+
+
+def build_geometry(
+    nx, ny, nz, dx, dy, dz, membrane_size_m, body_depth_m, koma_position="center",
+    enable_shin=False, shin_x_m=0.0, shin_z_m=0.0,
+):
     mem_cells_x = max(5, int(round(membrane_size_m / dx)))
     mem_cells_y = max(5, int(round(membrane_size_m / dy)))
     if mem_cells_x % 2 == 0:
@@ -347,6 +377,26 @@ def build_geometry(nx, ny, nz, dx, dy, dz, membrane_size_m, body_depth_m, koma_p
 
     cavity_mask = np.zeros((nx, ny, nz), dtype=bool)
     cavity_mask[mx0:mx1, my0:my1, z_front_face:z_back_face] = True
+
+    # 心: 胴内部を y 方向に貫通する剛体の直方体. x/z は胴内部の中央に配置する.
+    # cavity から取り除くことで下の solid_mask に入り, 面速度が 0 になって全反射になる.
+    shin = None
+    if enable_shin:
+        shin_x0, shin_x1 = centered_span(mx0, mx1, round(shin_x_m / dx))
+        shin_z0, shin_z1 = centered_span(z_front_face, z_back_face, round(shin_z_m / dz))
+        if shin_z0 <= z_front_face or shin_z1 >= z_back_face:
+            raise ValueError("shin touches a membrane face; reduce shin_z_m or increase body_depth_m")
+        cavity_mask[shin_x0:shin_x1, my0:my1, shin_z0:shin_z1] = False
+        shin = {
+            "x": [int(shin_x0), int(shin_x1)],
+            "y": [int(my0), int(my1)],
+            "z": [int(shin_z0), int(shin_z1)],
+            "size_m": [
+                float((shin_x1 - shin_x0) * dx),
+                float((my1 - my0) * dy),
+                float((shin_z1 - shin_z0) * dz),
+            ],
+        }
 
     solid_mask = np.zeros((nx, ny, nz), dtype=bool)
     solid_mask[:, :, z_front_face:z_back_face] = True
@@ -388,6 +438,7 @@ def build_geometry(nx, ny, nz, dx, dy, dz, membrane_size_m, body_depth_m, koma_p
         "bridge_x_l": bridge_x_l,
         "bridge_x_r": bridge_x_r,
         "bridge_y_local": bridge_y_local,
+        "shin": shin,
     }
 
 
@@ -878,7 +929,10 @@ def run_simulation(args):
     dt = args.courant / (C_AIR * math.sqrt(1.0 / (dx * dx) + 1.0 / (dy * dy) + 1.0 / (dz * dz)))
     nt = max(1, int(round(args.sim_time / dt)))
 
-    geom = build_geometry(nx, ny, nz, dx, dy, dz, args.membrane_size, args.body_depth, args.koma_position)
+    geom = build_geometry(
+        nx, ny, nz, dx, dy, dz, args.membrane_size, args.body_depth, args.koma_position,
+        enable_shin=args.enable_shin, shin_x_m=args.shin_x, shin_z_m=args.shin_z,
+    )
     mx0, mx1 = geom["mx0"], geom["mx1"]
     my0, my1 = geom["my0"], geom["my1"]
     z_front_face, z_back_face = geom["z_front_face"], geom["z_back_face"]
@@ -1121,6 +1175,8 @@ def run_simulation(args):
             "z_front_face": z_front_face,
             "z_back_face": z_back_face,
             "depth_cells": geom["depth_cells"],
+            "enable_shin": bool(args.enable_shin),
+            "shin": geom["shin"],
             "tension_n_m": args.tension,
             "back_tension_ratio": args.back_tension_ratio,
             "membrane_thickness_m": args.membrane_thickness,
@@ -1192,6 +1248,9 @@ def build_config():
         pml_strength=PML_STRENGTH,
         membrane_size=MEMBRANE_SIZE_M,
         body_depth=BODY_DEPTH_M,
+        enable_shin=ENABLE_SHIN,
+        shin_x=SHIN_X_M,
+        shin_z=SHIN_Z_M,
         tension=MEMBRANE_TENSION,
         back_tension_ratio=BACK_TENSION_RATIO,
         membrane_thickness=MEMBRANE_THICKNESS_M,

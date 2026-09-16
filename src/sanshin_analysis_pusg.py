@@ -61,11 +61,11 @@ INPUT_MODE = "impulse"
 
 # choices: "delta", "ricker", "band_limited_noise", "hann_sine", band_limited_sinc"
 #sincの有効幅 at least 2 / fl  [s]
-IMPULSE_PROFILE = "delta"
+IMPULSE_PROFILE = "band_limited_sinc"
 IMPULSE_DISPLACEMENT_M = 0.001
 IMPULSE_CENTER_FREQ_HZ = 463.899
-IMPULSE_LOW_FREQ_HZ = 50.0
-IMPULSE_HIGH_FREQ_HZ = 5000.0
+IMPULSE_LOW_FREQ_HZ = 150.0
+IMPULSE_HIGH_FREQ_HZ = 6100.0
 IMPULSE_DELAY_SEC = 0.006
 IMPULSE_DURATION_SEC = 0.060
 IMPULSE_FADE_SEC = 0.004

@@ -49,6 +49,13 @@ BACK_MEMBRANE_DAMPING = 10.0
 
 BRIDGE_WIDTH_M = 0.016
 
+# 胴側面の端の扱い
+#   "infinite": 胴の厚み (z) 分の剛体スラブが xy 全域に広がる (無限バッフル)
+#   "finite":   胴の周囲のみ厚さ SIDE_WALL_THICKNESS_M の完全剛体の側壁とし, その外側は空気 (有限バッフル)
+# choices: "infinite", "finite"
+BAFFLE_TYPE = "finite"
+SIDE_WALL_THICKNESS_M = 0.002
+
 # 心 (棹が胴内部を貫通する部分). 全反射の剛体として扱う
 # choices: True, False
 ENABLE_SHIN = True
@@ -157,6 +164,15 @@ def _shin_tag(enable_shin: bool, shin_x_m: float, shin_z_m: float) -> str | None
     return f"shin{_compact_number(shin_x_m * 1000.0)}x{_compact_number(shin_z_m * 1000.0)}mm"
 
 
+def _baffle_tag(baffle_type: str, side_wall_thickness_m: float) -> str | None:
+    kind = str(baffle_type).lower()
+    if kind == "infinite":
+        return None
+    if kind == "finite":
+        return f"fb{_compact_number(side_wall_thickness_m * 1000.0)}mm"
+    raise ValueError(f"unknown baffle type for output naming: {baffle_type}")
+
+
 def _sim_time_tag(sim_time_sec: float) -> str | None:
     if abs(sim_time_sec - 0.3) < 1e-9:
         return None
@@ -173,6 +189,8 @@ def build_output_stem(
     enable_shin: bool,
     shin_x_m: float,
     shin_z_m: float,
+    baffle_type: str = "infinite",
+    side_wall_thickness_m: float = 0.0,
 ) -> str:
     parts = ["sanshin_force", _source_tag(input_mode)]
     for tag in (
@@ -181,6 +199,7 @@ def build_output_stem(
         _thickness_tag(thickness_m),
         _koma_tag(koma_position),
         _shin_tag(enable_shin, shin_x_m, shin_z_m),
+        _baffle_tag(baffle_type, side_wall_thickness_m),
         _sim_time_tag(sim_time_sec),
     ):
         if tag:
@@ -198,6 +217,8 @@ OUTPUT_STEM = build_output_stem(
     enable_shin=ENABLE_SHIN,
     shin_x_m=SHIN_X_M,
     shin_z_m=SHIN_Z_M,
+    baffle_type=BAFFLE_TYPE,
+    side_wall_thickness_m=SIDE_WALL_THICKNESS_M,
 )
 OUTPUT_NPY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}.npy"
 OUTPUT_JSON_PATH = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_summary.json"
@@ -357,6 +378,7 @@ def centered_span(lo: int, hi: int, cells: int):
 def build_geometry(
     nx, ny, nz, dx, dy, dz, membrane_size_m, body_depth_m, koma_position="center",
     enable_shin=False, shin_x_m=0.0, shin_z_m=0.0,
+    baffle_type="infinite", side_wall_thickness_m=0.0,
 ):
     mem_cells_x = max(5, int(round(membrane_size_m / dx)))
     mem_cells_y = max(5, int(round(membrane_size_m / dy)))
@@ -399,7 +421,28 @@ def build_geometry(
         }
 
     solid_mask = np.zeros((nx, ny, nz), dtype=bool)
-    solid_mask[:, :, z_front_face:z_back_face] = True
+    baffle_type = str(baffle_type).lower()
+    side_wall = None
+    if baffle_type == "infinite":
+        solid_mask[:, :, z_front_face:z_back_face] = True
+    elif baffle_type == "finite":
+        # 胴の周囲だけを完全剛体の側壁とする. 壁セルは air_mask 外になるので
+        # 壁に接する面の粒子速度は 0 (全反射) になり, 壁の外側は空気として音が回り込む.
+        wall_x = max(1, int(round(side_wall_thickness_m / dx)))
+        wall_y = max(1, int(round(side_wall_thickness_m / dy)))
+        wx0, wx1 = mx0 - wall_x, mx1 + wall_x
+        wy0, wy1 = my0 - wall_y, my1 + wall_y
+        if wx0 < 2 or wx1 > nx - 2 or wy0 < 2 or wy1 > ny - 2:
+            raise ValueError("side wall is too thick for the grid")
+        solid_mask[wx0:wx1, wy0:wy1, z_front_face:z_back_face] = True
+        side_wall = {
+            "x": [int(wx0), int(wx1)],
+            "y": [int(wy0), int(wy1)],
+            "z": [int(z_front_face), int(z_back_face)],
+            "thickness_m": [float(wall_x * dx), float(wall_y * dy)],
+        }
+    else:
+        raise ValueError(f"unknown baffle type: {baffle_type}")
     solid_mask[cavity_mask] = False
 
     air_mask = ~solid_mask
@@ -439,6 +482,8 @@ def build_geometry(
         "bridge_x_r": bridge_x_r,
         "bridge_y_local": bridge_y_local,
         "shin": shin,
+        "baffle_type": baffle_type,
+        "side_wall": side_wall,
     }
 
 
@@ -932,6 +977,7 @@ def run_simulation(args):
     geom = build_geometry(
         nx, ny, nz, dx, dy, dz, args.membrane_size, args.body_depth, args.koma_position,
         enable_shin=args.enable_shin, shin_x_m=args.shin_x, shin_z_m=args.shin_z,
+        baffle_type=args.baffle_type, side_wall_thickness_m=args.side_wall_thickness,
     )
     mx0, mx1 = geom["mx0"], geom["mx1"]
     my0, my1 = geom["my0"], geom["my1"]
@@ -1027,6 +1073,7 @@ def run_simulation(args):
     koma_label = "center (L/2)" if args.koma_position == "center" else "real (2L/3)"
     print(f"--- Simulation start (Single GPU) ---")
     print(f"Grid: {nx} x {ny} x {nz}, dt={dt:.3e} s, nt={nt}, device={device0}")
+    print(f"Baffle: {geom['baffle_type']}  side_wall={geom['side_wall']}")
     print(f"Koma position: {koma_label}  bridge_y_local={bridge_y_local}  (global y={my0+bridge_y_local})")
     print(f"Bridge force scale: {args.bridge_force_scale:.3e} N/m  accel_per_drive: {accel_per_drive:.3e} m/s^2/m")
     sleep_budget = (nt // cool_every_steps) * cool_sleep_sec if cool_every_steps > 0 else 0.0
@@ -1177,6 +1224,8 @@ def run_simulation(args):
             "depth_cells": geom["depth_cells"],
             "enable_shin": bool(args.enable_shin),
             "shin": geom["shin"],
+            "baffle_type": geom["baffle_type"],
+            "side_wall": geom["side_wall"],
             "tension_n_m": args.tension,
             "back_tension_ratio": args.back_tension_ratio,
             "membrane_thickness_m": args.membrane_thickness,
@@ -1251,6 +1300,8 @@ def build_config():
         enable_shin=ENABLE_SHIN,
         shin_x=SHIN_X_M,
         shin_z=SHIN_Z_M,
+        baffle_type=BAFFLE_TYPE,
+        side_wall_thickness=SIDE_WALL_THICKNESS_M,
         tension=MEMBRANE_TENSION,
         back_tension_ratio=BACK_TENSION_RATIO,
         membrane_thickness=MEMBRANE_THICKNESS_M,

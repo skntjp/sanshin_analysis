@@ -54,7 +54,7 @@ BRIDGE_WIDTH_M = 0.016
 #   "finite":   胴の周囲のみ厚さ SIDE_WALL_THICKNESS_M の完全剛体の側壁とし, その外側は空気 (有限バッフル)
 # choices: "infinite", "finite"
 BAFFLE_TYPE = "finite"
-SIDE_WALL_THICKNESS_M = 0.002
+SIDE_WALL_THICKNESS_M = 0.008
 
 # 心 (棹が胴内部を貫通する部分). 全反射の剛体として扱う
 # choices: True, False

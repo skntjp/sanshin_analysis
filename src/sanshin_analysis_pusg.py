@@ -119,6 +119,20 @@ FARFIELD_SURFACE_HALF_EXTENT_M = 0.32
 FARFIELD_SURFACE_STRIDE = 2
 FARFIELD_SURFACE_SAVE_INTERVAL = 16
 
+# 表膜/裏膜の変位 w(x, y, t) の時系列記録.
+# 間引き後の記録レート fs = 1/(dt * MEMBRANE_HISTORY_SAVE_INTERVAL) で,
+# 評価可能な上限は fs/2. 膜の空間解像度 (dx=2mm, 裏膜 c=sqrt(0.8T/sigma_s))
+# から信用できるのは 6.5kHz 程度なので, interval=16 (fs=21.8kHz, Nyquist 10.9kHz)
+# なら十分な余裕がある. farfield surface と同じ間引きなので時間軸も揃う.
+# choices: True, False
+SAVE_MEMBRANE_HISTORY = True
+MEMBRANE_HISTORY_SAVE_INTERVAL = 16
+MEMBRANE_HISTORY_STRIDE = 1
+# 単純な間引きだと Nyquist 以上の成分が折り返すので, interval 分を移動平均 (箱型窓)
+# してから 1 フレーム書く. 箱型窓の零点が k*fs に乗るため折り返し元の帯域を狙って潰せる.
+# choices: True, False
+MEMBRANE_HISTORY_BOXCAR = True
+
 
 def _compact_number(value: float) -> str:
     text = f"{value:.6g}"
@@ -224,6 +238,7 @@ OUTPUT_NPY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}.npy"
 OUTPUT_JSON_PATH = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_summary.json"
 OUTPUT_PNG_PATH = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_diagnostics.png"
 OUTPUT_FARFIELD_SURFACE = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_farfield_surface.json"
+OUTPUT_MEMBRANE_HISTORY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_membrane_history.json"
 RUN_NAME = OUTPUT_STEM
 
 SEAM_REL_WARM = 0.02
@@ -962,6 +977,148 @@ def finalize_farfield_surface(layout):
     return layout["meta"]
 
 
+def build_membrane_history_layout(args, geom: dict, nt: int, dt: float, device) -> dict:
+    interval = max(1, int(args.membrane_history_interval))
+    stride = max(1, int(args.membrane_history_stride))
+    boxcar = bool(args.membrane_history_boxcar)
+
+    mem_nx = int(geom["mem_cells_x"])
+    mem_ny = int(geom["mem_cells_y"])
+    x_idx = np.arange(0, mem_nx, stride, dtype=np.int64)
+    y_idx = np.arange(0, mem_ny, stride, dtype=np.int64)
+    nframes = ((nt - 1) // interval) + 1
+
+    # 既存の histories / t_axis と同じく, ソルバのステップ index n を時刻 n*dt とみなす.
+    # boxcar 有効時のフレーム時刻はその窓の中心.
+    frame_times = np.empty(nframes, dtype=np.float64)
+    last_count = interval
+    for k in range(nframes):
+        start = k * interval
+        stop = min(start + interval, nt)
+        if boxcar:
+            frame_times[k] = 0.5 * (start + stop - 1) * dt
+        else:
+            frame_times[k] = start * dt
+        if k == nframes - 1:
+            last_count = stop - start
+
+    OUTPUT_MEMBRANE_HISTORY.parent.mkdir(parents=True, exist_ok=True)
+    front_path = OUTPUT_MEMBRANE_HISTORY.with_name(OUTPUT_MEMBRANE_HISTORY.stem + "_front.npy")
+    back_path = OUTPUT_MEMBRANE_HISTORY.with_name(OUTPUT_MEMBRANE_HISTORY.stem + "_back.npy")
+    t_path = OUTPUT_MEMBRANE_HISTORY.with_name(OUTPUT_MEMBRANE_HISTORY.stem + "_t.npy")
+    shape = (nframes, int(x_idx.size), int(y_idx.size))
+    front_mem = np.lib.format.open_memmap(front_path, mode="w+", dtype=np.float32, shape=shape)
+    back_mem = np.lib.format.open_memmap(back_path, mode="w+", dtype=np.float32, shape=shape)
+    np.save(t_path, frame_times)
+
+    fs_record = 1.0 / (dt * interval)
+    meta = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "purpose": "front/back membrane displacement field time history",
+        "simulation": Path(__file__).name if "__file__" in globals() else "sanshin_analysis_pusg.py",
+        "front_path": str(front_path),
+        "back_path": str(back_path),
+        "time_path": str(t_path),
+        "components": ["w_front_m", "w_back_m"],
+        "array_shape": [int(shape[0]), int(shape[1]), int(shape[2])],
+        "array_axes": ["frame", "membrane_x", "membrane_y"],
+        "save_interval_steps": interval,
+        "membrane_stride_cells": stride,
+        "boxcar_average": boxcar,
+        "dt_solver_sec": float(dt),
+        "dt_record_sec": float(dt * interval),
+        "record_rate_hz": float(fs_record),
+        "record_nyquist_hz": float(0.5 * fs_record),
+        "frame_count": int(nframes),
+        "last_frame_sample_count": int(last_count),
+        "membrane_grid_cells": [mem_nx, mem_ny],
+        "membrane_spacing_m": [float(args.dx * stride), float(args.dy * stride)],
+        "membrane_size_m": float(args.membrane_size),
+        "membrane_origin_m": [
+            float(-0.5 * (mem_nx - 1) * args.dx),
+            float(-0.5 * (mem_ny - 1) * args.dy),
+        ],
+        "membrane_global_indices": {
+            "x": [int(geom["mx0"]), int(geom["mx1"])],
+            "y": [int(geom["my0"]), int(geom["my1"])],
+            "z_front_face": int(geom["z_front_face"]),
+            "z_back_face": int(geom["z_back_face"]),
+        },
+        "bridge_local_indices": {
+            "x": [int(geom["bridge_x_l"]), int(geom["bridge_x_r"])],
+            "y": int(geom["bridge_y_local"]),
+        },
+        "time_alignment": (
+            "frame k covers solver steps [k*interval, min((k+1)*interval, nt)-1]; "
+            "stored time is the window center (boxcar) or the first step (plain decimation), "
+            "with step n treated as time n*dt to match the scalar histories"
+        ),
+        "boundary_condition": "w = 0 on the membrane rim (clamped), so the outermost row/column is always zero",
+        "notes": [
+            "Displacement is in meters, positive along +z.",
+            f"Usable evaluation band is roughly DC to {0.5 * fs_record:.0f} Hz from the record rate, "
+            "but the membrane grid (dx) limits trustworthy physics to about 6.5 kHz.",
+            "Boxcar averaging acts as an anti-alias filter whose nulls sit on multiples of the record rate.",
+        ],
+    }
+    return {
+        "interval": interval,
+        "stride": stride,
+        "boxcar": boxcar,
+        "nt": int(nt),
+        "frame_cursor": 0,
+        "acc_front": torch.zeros((mem_nx, mem_ny), dtype=torch.float32, device=device) if boxcar else None,
+        "acc_back": torch.zeros((mem_nx, mem_ny), dtype=torch.float32, device=device) if boxcar else None,
+        "acc_count": 0,
+        "front": front_mem,
+        "back": back_mem,
+        "meta": meta,
+        "meta_path": OUTPUT_MEMBRANE_HISTORY,
+    }
+
+
+def _write_membrane_history_frame(layout, w_front: torch.Tensor, w_back: torch.Tensor):
+    cursor = int(layout["frame_cursor"])
+    if cursor >= layout["front"].shape[0]:
+        return
+    stride = layout["stride"]
+    sl = (slice(None, None, stride), slice(None, None, stride))
+    layout["front"][cursor, :, :] = w_front[sl].detach().cpu().numpy()
+    layout["back"][cursor, :, :] = w_back[sl].detach().cpu().numpy()
+    layout["frame_cursor"] = cursor + 1
+
+
+def accumulate_membrane_history(layout, step: int, w_front: torch.Tensor, w_back: torch.Tensor):
+    if layout is None:
+        return
+    interval = layout["interval"]
+    if not layout["boxcar"]:
+        if step % interval == 0:
+            _write_membrane_history_frame(layout, w_front, w_back)
+        return
+
+    layout["acc_front"] += w_front
+    layout["acc_back"] += w_back
+    layout["acc_count"] += 1
+    if (step % interval) != interval - 1 and step != layout["nt"] - 1:
+        return
+    n = float(layout["acc_count"])
+    _write_membrane_history_frame(layout, layout["acc_front"] / n, layout["acc_back"] / n)
+    layout["acc_front"].zero_()
+    layout["acc_back"].zero_()
+    layout["acc_count"] = 0
+
+
+def finalize_membrane_history(layout):
+    if layout is None:
+        return None
+    layout["front"].flush()
+    layout["back"].flush()
+    layout["meta"]["frames_written"] = int(layout["frame_cursor"])
+    layout["meta_path"].write_text(json.dumps(layout["meta"], indent=2), encoding="utf-8")
+    return layout["meta"]
+
+
 def run_simulation(args):
     cuda_count = torch.cuda.device_count()
     if cuda_count < 1:
@@ -1093,6 +1250,19 @@ def run_simulation(args):
             f"points={farfield_surface['meta']['surface_point_count']}, "
             f"frames={farfield_surface['meta']['frame_count']}"
         )
+    membrane_history = None
+    if args.save_membrane_history:
+        membrane_history = build_membrane_history_layout(args, geom, nt, dt, device0)
+        mh_meta = membrane_history["meta"]
+        mh_bytes = 2 * 4 * mh_meta["array_shape"][0] * mh_meta["array_shape"][1] * mh_meta["array_shape"][2]
+        print(
+            "Membrane history: "
+            f"interval={mh_meta['save_interval_steps']}, stride={mh_meta['membrane_stride_cells']}, "
+            f"boxcar={mh_meta['boxcar_average']}, "
+            f"shape={tuple(mh_meta['array_shape'])} x2, "
+            f"rate={mh_meta['record_rate_hz']:.0f} Hz (Nyquist {mh_meta['record_nyquist_hz']:.0f} Hz), "
+            f"size={mh_bytes / 1e6:.1f} MB"
+        )
     drive_tensor = torch.from_numpy(drive_np).to(device0)
 
     with torch.no_grad():
@@ -1179,6 +1349,8 @@ def run_simulation(args):
             hist_back_total_energy[step]    = back_energy_last
             hist_acoustic_energy[step]      = acoustic_energy_last
 
+            accumulate_membrane_history(membrane_history, step, w_front, w_back)
+
             if step in frame_steps:
                 pressure_frames.append(p[:, ny // 2, :].detach().cpu().numpy())
             if step in mem_frame_steps:
@@ -1192,6 +1364,7 @@ def run_simulation(args):
                 sleep_accumulated += cool_sleep_sec
     elapsed = time.perf_counter() - t0
     farfield_surface_meta = finalize_farfield_surface(farfield_surface)
+    membrane_history_meta = finalize_membrane_history(membrane_history)
     t_axis = np.arange(nt, dtype=np.float64) * dt
     histories = {
         "drive":               np.asarray(drive_np, dtype=np.float64),
@@ -1250,6 +1423,7 @@ def run_simulation(args):
                 "z": [int(sz0), int(sz1)],
             },
             "farfield_surface": farfield_surface_meta,
+            "membrane_history": membrane_history_meta,
         },
         "analysis": {
             "peak_obs_pressure_pa":    float(np.max(np.abs(histories["obs_pressure"]))),
@@ -1340,6 +1514,10 @@ def build_config():
         target_resolution=TARGET_RESOLUTION,
         num_volume_saves=NUM_VOLUME_SAVES,
         save_npz=SAVE_NPZ,
+        save_membrane_history=SAVE_MEMBRANE_HISTORY,
+        membrane_history_interval=MEMBRANE_HISTORY_SAVE_INTERVAL,
+        membrane_history_stride=MEMBRANE_HISTORY_STRIDE,
+        membrane_history_boxcar=MEMBRANE_HISTORY_BOXCAR,
         energy_interval=ENERGY_INTERVAL,
         enable_cooling_sleep=ENABLE_COOLING_SLEEP,
         cool_every_steps=COOL_EVERY_STEPS if ENABLE_COOLING_SLEEP else 0,

@@ -89,12 +89,13 @@ SOUND_SAMPLE_RATE_HZ = 20000.0
 SOUND_GAIN = 0.0005
 # choices: True, False
 SOUND_ONSET_DETECT = True
-SOUND_ONSET_THRESH = 0.02
-SOUND_ONSET_MAX_SEC = 0.10
-# choices: "continuous", "gated"
-SOUND_DRIVE_MODE = "continuous"
-SOUND_APPLY_SEC = 0.03
-SOUND_FADE_SEC = 0.005
+# 立ち上がり閾値 = 先頭 SOUND_ONSET_NOISE_SEC 秒 (無音区間とみなす) の RMS × SOUND_ONSET_NOISE_FACTOR
+SOUND_ONSET_NOISE_SEC = 0.10
+SOUND_ONSET_NOISE_FACTOR = 10.0
+# 立ち上がり探索範囲 [s]. None でファイル全長
+SOUND_ONSET_MAX_SEC = None
+# 立ち上がりの何秒手前から切り出すか (矩形窓). 切り出し点はノイズレベルなので段差は無視できる
+SOUND_ONSET_PREROLL_SEC = 0.005
 
 NUM_FIELD_FRAMES = 8
 NUM_MEMBRANE_FRAMES = 8
@@ -128,10 +129,12 @@ FARFIELD_SURFACE_SAVE_INTERVAL = 16
 SAVE_MEMBRANE_HISTORY = True
 MEMBRANE_HISTORY_SAVE_INTERVAL = 16
 MEMBRANE_HISTORY_STRIDE = 1
-# 単純な間引きだと Nyquist 以上の成分が折り返すので, interval 分を移動平均 (箱型窓)
-# してから 1 フレーム書く. 箱型窓の零点が k*fs に乗るため折り返し元の帯域を狙って潰せる.
+# True にすると interval 分を移動平均 (箱型窓) してから 1 フレーム書く (アンチエイリアス).
+# 既定は False (単純間引き). solver は定数係数の線形時不変系なので入力に無い周波数は
+# 生成されず, 加振波形は 10.9kHz 以上が -157dB (float32 の量子化床) まで落ちている.
+# つまり折り返す元の成分が存在しないため, 平均化は 5kHz で -0.76dB の垂れを持ち込むだけ.
 # choices: True, False
-MEMBRANE_HISTORY_BOXCAR = True
+MEMBRANE_HISTORY_BOXCAR = False
 
 
 def _compact_number(value: float) -> str:
@@ -539,46 +542,44 @@ def load_sound_drive(args, nt: int, dt: float):
     if peak > 0.0:
         src = src / peak
 
+    fs_src = float(args.sound_sample_rate)
     start_idx = 0
+    onset_idx = None
+    noise_rms = None
+    onset_thresh = None
     if args.sound_onset_detect:
-        search_n = min(src.size, int(round(args.sound_onset_max_sec * args.sound_sample_rate)))
-        if search_n > 0:
-            mask = np.abs(src[:search_n]) >= args.sound_onset_thresh
-            if np.any(mask):
-                start_idx = int(np.argmax(mask))
+        noise_n = min(src.size, max(1, int(round(float(args.sound_onset_noise_sec) * fs_src))))
+        noise_rms = float(np.sqrt(np.mean(np.square(src[:noise_n], dtype=np.float64))))
+        onset_thresh = float(args.sound_onset_noise_factor) * noise_rms
+        if args.sound_onset_max_sec is None:
+            search_n = src.size
+        else:
+            search_n = min(src.size, int(round(float(args.sound_onset_max_sec) * fs_src)))
+        mask = np.abs(src[:search_n]) >= onset_thresh
+        if onset_thresh > 0.0 and np.any(mask):
+            onset_idx = int(np.argmax(mask))
+            preroll_n = int(round(float(args.sound_onset_preroll_sec) * fs_src))
+            start_idx = max(0, onset_idx - preroll_n)
+        else:
+            print(f"[warn] sound onset not found (thresh={onset_thresh:.4g}); using file from t=0")
     if start_idx > 0:
         src = src[start_idx:]
 
     t_sim = np.arange(nt, dtype=np.float64) * dt
-    t_src = np.arange(src.size, dtype=np.float64) / float(args.sound_sample_rate)
+    t_src = np.arange(src.size, dtype=np.float64) / fs_src
     drive = np.interp(t_sim, t_src, src, left=0.0, right=0.0).astype(np.float32)
     drive *= float(args.sound_gain)
-    sound_drive_mode = str(args.sound_drive_mode).lower()
-    apply_steps = None
-    fade_steps = None
-    if sound_drive_mode == "gated":
-        gated = np.zeros_like(drive)
-        apply_steps = min(nt, max(1, int(round(float(args.sound_apply_sec) / dt))))
-        fade_steps = max(0, int(round(float(args.sound_fade_sec) / dt)))
-        envelope = np.ones(apply_steps, dtype=np.float32)
-        if fade_steps > 0 and fade_steps * 2 < apply_steps:
-            fade = 0.5 * (1.0 + np.cos(np.linspace(0.0, np.pi, fade_steps, dtype=np.float32)))
-            envelope[-fade_steps:] *= fade
-        gated[:apply_steps] = drive[:apply_steps] * envelope
-        drive = gated
-    elif sound_drive_mode != "continuous":
-        raise ValueError(f"unknown sound drive mode: {args.sound_drive_mode}")
     return drive, {
         "sound_file": str(path),
         "sound_sample_rate_hz": float(args.sound_sample_rate),
         "sound_gain": float(args.sound_gain),
-        "sound_drive_mode": sound_drive_mode,
-        "sound_apply_sec": float(args.sound_apply_sec) if sound_drive_mode == "gated" else None,
-        "sound_fade_sec": float(args.sound_fade_sec) if sound_drive_mode == "gated" else None,
-        "sound_apply_steps": int(apply_steps) if apply_steps is not None else None,
-        "sound_fade_steps": int(fade_steps) if fade_steps is not None else None,
         "sound_onset_detect": bool(args.sound_onset_detect),
-        "sound_onset_thresh": float(args.sound_onset_thresh),
+        "sound_onset_noise_sec": float(args.sound_onset_noise_sec),
+        "sound_onset_noise_factor": float(args.sound_onset_noise_factor),
+        "sound_onset_noise_rms": noise_rms,
+        "sound_onset_thresh": onset_thresh,
+        "sound_onset_sec": onset_idx / fs_src if onset_idx is not None else None,
+        "sound_onset_preroll_sec": (onset_idx - start_idx) / fs_src if onset_idx is not None else None,
         "sound_onset_shift_samples": int(start_idx),
         "sound_loaded_samples": int(src.size),
         "active_steps": int(np.count_nonzero(drive)),
@@ -1500,12 +1501,11 @@ def build_config():
         sound_file=SOUND_FILE,
         sound_sample_rate=SOUND_SAMPLE_RATE_HZ,
         sound_gain=SOUND_GAIN,
-        sound_drive_mode=SOUND_DRIVE_MODE,
-        sound_apply_sec=SOUND_APPLY_SEC,
-        sound_fade_sec=SOUND_FADE_SEC,
         sound_onset_detect=SOUND_ONSET_DETECT,
-        sound_onset_thresh=SOUND_ONSET_THRESH,
+        sound_onset_noise_sec=SOUND_ONSET_NOISE_SEC,
+        sound_onset_noise_factor=SOUND_ONSET_NOISE_FACTOR,
         sound_onset_max_sec=SOUND_ONSET_MAX_SEC,
+        sound_onset_preroll_sec=SOUND_ONSET_PREROLL_SEC,
         field_frames=NUM_FIELD_FRAMES,
         membrane_frames=NUM_MEMBRANE_FRAMES,
         save_npy=SAVE_NPY,

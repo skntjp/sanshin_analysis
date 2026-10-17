@@ -843,7 +843,7 @@ def build_farfield_surface_layout(args, geom: dict, nt: int, dt: float) -> dict:
     stride = int(FARFIELD_SURFACE_STRIDE)
     interval = int(FARFIELD_SURFACE_SAVE_INTERVAL)
     cx = int(round((args.nx - 1) * 0.5))
-    cy = int(geom["my0"] + geom["bridge_y_local"])
+    cy = int(round((args.ny - 1) * 0.5))
     cz = int(round(int(geom["z_front_face"]) + 0.5 * float(args.body_depth) / args.dz))
     ix0, ix1 = cx - half_cells, cx + half_cells
     iy0, iy1 = cy - half_cells, cy + half_cells

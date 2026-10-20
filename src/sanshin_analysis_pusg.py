@@ -101,8 +101,12 @@ NUM_FIELD_FRAMES = 8
 NUM_MEMBRANE_FRAMES = 8
 TARGET_RESOLUTION = 100
 NUM_VOLUME_SAVES = 3700
+# 3次元音圧ボリューム ({OUTPUT_STEM}.npy). 大容量 (現設定で約15 GB) かつ RAM にも溜め込む
 # choices: True, False
-SAVE_NPY = True
+SAVE_NPY = False
+# 観測点の音圧波形 ({OUTPUT_STEM}_obs_pressure.npy). 全ステップ・間引きなし (約0.4 MB). SAVE_NPY とは独立
+# choices: True, False
+SAVE_OBS_NPY = True
 # choices: True, False
 SAVE_JSON = True
 # choices: True, False
@@ -465,6 +469,9 @@ def build_geometry(
 
     air_mask = ~solid_mask
 
+    # 観測点: x, y は皮の中心, z は表皮から 0.30 m 前方.
+    obs_x = mx0 + mem_cells_x // 2
+    obs_y = my0 + mem_cells_y // 2
     obs_offset_cells = int(round(0.30 / dz))
     obs_z = z_front_face - obs_offset_cells
     if obs_z <= 1:
@@ -493,8 +500,8 @@ def build_geometry(
         "air_mask": air_mask,
         "solid_mask": solid_mask,
         "cavity_mask": cavity_mask,
-        "obs_x": nx // 2,
-        "obs_y": ny // 2,
+        "obs_x": obs_x,
+        "obs_y": obs_y,
         "obs_z": obs_z,
         "bridge_x_l": bridge_x_l,
         "bridge_x_r": bridge_x_r,
@@ -1236,7 +1243,7 @@ def run_simulation(args):
     print(f"Bridge force scale: {args.bridge_force_scale:.3e} N/m  accel_per_drive: {accel_per_drive:.3e} m/s^2/m")
     sleep_budget = (nt // cool_every_steps) * cool_sleep_sec if cool_every_steps > 0 else 0.0
     print(
-        f"Outputs: npy={args.save_npy}, json={args.save_json}, png={args.save_png}; "
+        f"Outputs: npy={args.save_npy}, obs_npy={args.save_obs_npy}, json={args.save_json}, png={args.save_png}; "
         f"cool_sleep_budget={sleep_budget:.1f}s "
         f"(every {cool_every_steps} steps x {cool_sleep_sec:.3f}s)"
     )
@@ -1509,6 +1516,7 @@ def build_config():
         field_frames=NUM_FIELD_FRAMES,
         membrane_frames=NUM_MEMBRANE_FRAMES,
         save_npy=SAVE_NPY,
+        save_obs_npy=SAVE_OBS_NPY,
         save_json=SAVE_JSON,
         save_png=SAVE_PNG,
         target_resolution=TARGET_RESOLUTION,
@@ -1592,6 +1600,8 @@ def main():
 
     if args.save_npy:
         np.save(OUTPUT_NPY, np.asarray(volume_frames, dtype=np.float32))
+
+    if args.save_obs_npy:
         OUTPUT_OBS_NPY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_obs_pressure.npy"
         np.save(OUTPUT_OBS_NPY, histories["obs_pressure"].astype(np.float32))
         print(f"Saved un-subsampled observation pressure wave to: {OUTPUT_OBS_NPY}")

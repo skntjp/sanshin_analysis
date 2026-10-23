@@ -78,7 +78,7 @@ IMPULSE_PROFILE = "band_limited_sinc"
 IMPULSE_DISPLACEMENT_M = 0.001
 IMPULSE_CENTER_FREQ_HZ = 463.899
 IMPULSE_LOW_FREQ_HZ = 150.0
-IMPULSE_HIGH_FREQ_HZ = 6100.0
+IMPULSE_HIGH_FREQ_HZ = 1000.0
 IMPULSE_DELAY_SEC = 0.006
 IMPULSE_DURATION_SEC = 0.060
 IMPULSE_FADE_SEC = 0.004
@@ -104,7 +104,8 @@ NUM_VOLUME_SAVES = 3700
 # 3次元音圧ボリューム ({OUTPUT_STEM}.npy). 大容量 (現設定で約15 GB) かつ RAM にも溜め込む
 # choices: True, False
 SAVE_NPY = False
-# 観測点の音圧波形 ({OUTPUT_STEM}_obs_pressure.npy). 全ステップ・間引きなし (約0.4 MB). SAVE_NPY とは独立
+# 観測点の音圧波形 ({OUTPUT_STEM}_front_obs_pressure.npy / _back_obs_pressure.npy).
+# 観測点はキルヒホッフ面積分面 (z- / z+ 面) 上の表膜/裏膜中心の真正面. 全ステップ・間引きなし (各約0.4 MB). SAVE_NPY とは独立
 # choices: True, False
 SAVE_OBS_NPY = True
 # choices: True, False
@@ -251,7 +252,8 @@ RUN_NAME = OUTPUT_STEM
 SEAM_REL_WARM = 0.02
 
 METRIC_KEYS = (
-    "peak_obs_pressure_pa",
+    "peak_front_obs_pressure_pa",
+    "peak_back_obs_pressure_pa",
     "peak_front_center_w_m",
     "peak_back_center_w_m",
     "peak_front_jump_pa",
@@ -259,7 +261,8 @@ METRIC_KEYS = (
 )
 
 HISTORY_COMPARE_KEYS = (
-    "obs_pressure",
+    "front_obs_pressure",
+    "back_obs_pressure",
     "front_center_w",
     "back_center_w",
     "front_jump",
@@ -341,7 +344,7 @@ def post_drive_analysis(histories: dict, t_axis: np.ndarray, dt: float) -> dict:
         ("post_100_150ms", 0.100, 0.150),
         ("post_150_200ms", 0.150, 0.200),
     ]
-    signals = ["obs_pressure", "front_center_w", "back_center_w", "front_jump", "back_jump"]
+    signals = ["front_obs_pressure", "back_obs_pressure", "front_center_w", "back_center_w", "front_jump", "back_jump"]
     result = {
         "drive_start_sec": drive_start,
         "drive_end_sec": drive_end,
@@ -395,6 +398,13 @@ def centered_span(lo: int, hi: int, cells: int):
         raise ValueError("span is too large for the available region")
     start = lo + (hi - lo - cells) // 2
     return start, start + cells
+
+
+def farfield_surface_z_bounds(z_front_face: int, body_depth_m: float, dx: float, dz: float):
+    """キルヒホッフ面積分面の z- / z+ 面のセル番号 (build_farfield_surface_layout と共通)."""
+    half_cells = int(round(FARFIELD_SURFACE_HALF_EXTENT_M / dx))
+    cz = int(round(int(z_front_face) + 0.5 * float(body_depth_m) / dz))
+    return cz - half_cells, cz + half_cells
 
 
 def build_geometry(
@@ -469,13 +479,12 @@ def build_geometry(
 
     air_mask = ~solid_mask
 
-    # 観測点: x, y は皮の中心, z は表皮から 0.30 m 前方.
+    # 観測点: x, y は皮の中心, z はキルヒホッフ面積分面の z- 面 (表膜側) / z+ 面 (裏膜側).
     obs_x = mx0 + mem_cells_x // 2
     obs_y = my0 + mem_cells_y // 2
-    obs_offset_cells = int(round(0.30 / dz))
-    obs_z = z_front_face - obs_offset_cells
-    if obs_z <= 1:
-        raise ValueError("front observation point would leave the domain")
+    front_obs_z, back_obs_z = farfield_surface_z_bounds(z_front_face, body_depth_m, dx, dz)
+    if front_obs_z <= 1 or back_obs_z >= nz - 1:
+        raise ValueError("observation point would leave the domain")
 
     bridge_half_width = max(0, int(round((BRIDGE_WIDTH_M / 2.0) / dx)))
     bridge_x_local = mem_cells_x // 2
@@ -502,7 +511,8 @@ def build_geometry(
         "cavity_mask": cavity_mask,
         "obs_x": obs_x,
         "obs_y": obs_y,
-        "obs_z": obs_z,
+        "front_obs_z": front_obs_z,
+        "back_obs_z": back_obs_z,
         "bridge_x_l": bridge_x_l,
         "bridge_x_r": bridge_x_r,
         "bridge_y_local": bridge_y_local,
@@ -715,9 +725,11 @@ def save_diagnostic_png(
     axes[0].set_ylabel("m")
     axes[0].set_xlim(0.0, float(impulse_duration_sec) * 1000.0)
 
-    axes[1].plot(t_ms, histories["obs_pressure"], color="tab:blue")
+    axes[1].plot(t_ms, histories["front_obs_pressure"], label="front", color="tab:blue")
+    axes[1].plot(t_ms, histories["back_obs_pressure"], label="back", color="tab:cyan")
     axes[1].set_title("observation pressure")
     axes[1].set_ylabel("Pa")
+    axes[1].legend()
 
     axes[2].plot(t_ms, histories["front_center_w"], label="front", color="tab:orange")
     axes[2].plot(t_ms, histories["back_center_w"], label="back", color="tab:green")
@@ -755,7 +767,8 @@ def save_diagnostic_png(
 
     freq = np.fft.rfftfreq(t_axis.size, dt)
     for key, label in [
-        ("obs_pressure", "obs pressure"),
+        ("front_obs_pressure", "front obs pressure"),
+        ("back_obs_pressure", "back obs pressure"),
         ("front_center_w", "front membrane"),
         ("back_center_w", "back membrane"),
     ]:
@@ -771,8 +784,8 @@ def save_diagnostic_png(
     post = summary["analysis"].get("post_drive", {}).get("signals", {})
     labels = ["66-100", "100-150", "150-200"]
     x = np.arange(len(labels))
-    width = 0.18
-    for i, key in enumerate(["obs_pressure", "front_center_w", "back_center_w", "front_jump"]):
+    width = 0.15
+    for i, key in enumerate(["front_obs_pressure", "back_obs_pressure", "front_center_w", "back_center_w", "front_jump"]):
         windows = post.get(key, {}).get("windows", {})
         vals = [
             windows.get("post_066_100ms", {}).get("rms"),
@@ -781,7 +794,7 @@ def save_diagnostic_png(
         ]
         base = vals[0] if vals[0] not in (None, 0.0) else None
         ratios = [0.0 if base is None or v is None else float(v / base) for v in vals]
-        axes[8].bar(x + (i - 1.5) * width, ratios, width, label=key)
+        axes[8].bar(x + (i - 2.0) * width, ratios, width, label=key)
     axes[8].set_title("post-drive RMS ratio")
     axes[8].set_xticks(x, labels)
     axes[8].legend(fontsize=8)
@@ -854,7 +867,7 @@ def build_farfield_surface_layout(args, geom: dict, nt: int, dt: float) -> dict:
     cz = int(round(int(geom["z_front_face"]) + 0.5 * float(args.body_depth) / args.dz))
     ix0, ix1 = cx - half_cells, cx + half_cells
     iy0, iy1 = cy - half_cells, cy + half_cells
-    iz0, iz1 = cz - half_cells, cz + half_cells
+    iz0, iz1 = farfield_surface_z_bounds(geom["z_front_face"], args.body_depth, args.dx, args.dz)
     pml = int(args.pml_width)
     if ix0 <= pml or iy0 <= pml or iz0 <= pml or ix1 >= args.nx - pml or iy1 >= args.ny - pml or iz1 >= args.nz - pml:
         raise ValueError(
@@ -1209,7 +1222,8 @@ def run_simulation(args):
     back_frames = []
     volume_frames = []
 
-    hist_obs_pressure = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_front_obs_pressure = torch.empty(nt, dtype=torch.float32, device=device0)
+    hist_back_obs_pressure = torch.empty(nt, dtype=torch.float32, device=device0)
     hist_front_jump = torch.empty(nt, dtype=torch.float32, device=device0)
     hist_back_jump = torch.empty(nt, dtype=torch.float32, device=device0)
     hist_front_center_w = torch.empty(nt, dtype=torch.float32, device=device0)
@@ -1345,7 +1359,8 @@ def run_simulation(args):
                     )
                 )
 
-            hist_obs_pressure[step]         = p[geom["obs_x"], geom["obs_y"], geom["obs_z"]]
+            hist_front_obs_pressure[step]   = p[geom["obs_x"], geom["obs_y"], geom["front_obs_z"]]
+            hist_back_obs_pressure[step]    = p[geom["obs_x"], geom["obs_y"], geom["back_obs_z"]]
             hist_front_jump[step]           = torch.mean(delta_p_front)
             hist_back_jump[step]            = torch.mean(delta_p_back)
             hist_front_center_w[step]       = w_front[center]
@@ -1376,7 +1391,8 @@ def run_simulation(args):
     t_axis = np.arange(nt, dtype=np.float64) * dt
     histories = {
         "drive":               np.asarray(drive_np, dtype=np.float64),
-        "obs_pressure":        hist_obs_pressure.detach().cpu().numpy().astype(np.float64),
+        "front_obs_pressure":  hist_front_obs_pressure.detach().cpu().numpy().astype(np.float64),
+        "back_obs_pressure":   hist_back_obs_pressure.detach().cpu().numpy().astype(np.float64),
         "front_jump":          hist_front_jump.detach().cpu().numpy().astype(np.float64),
         "back_jump":           hist_back_jump.detach().cpu().numpy().astype(np.float64),
         "front_center_w":      hist_front_center_w.detach().cpu().numpy().astype(np.float64),
@@ -1403,6 +1419,8 @@ def run_simulation(args):
             "z_front_face": z_front_face,
             "z_back_face": z_back_face,
             "depth_cells": geom["depth_cells"],
+            "front_obs_point": [int(geom["obs_x"]), int(geom["obs_y"]), int(geom["front_obs_z"])],
+            "back_obs_point": [int(geom["obs_x"]), int(geom["obs_y"]), int(geom["back_obs_z"])],
             "enable_shin": bool(args.enable_shin),
             "shin": geom["shin"],
             "baffle_type": geom["baffle_type"],
@@ -1434,14 +1452,16 @@ def run_simulation(args):
             "membrane_history": membrane_history_meta,
         },
         "analysis": {
-            "peak_obs_pressure_pa":    float(np.max(np.abs(histories["obs_pressure"]))),
+            "peak_front_obs_pressure_pa": float(np.max(np.abs(histories["front_obs_pressure"]))),
+            "peak_back_obs_pressure_pa":  float(np.max(np.abs(histories["back_obs_pressure"]))),
             "peak_front_center_w_m":   float(np.max(np.abs(histories["front_center_w"]))),
             "peak_back_center_w_m":    float(np.max(np.abs(histories["back_center_w"]))),
             "peak_front_jump_pa":      float(np.max(np.abs(histories["front_jump"]))),
             "peak_back_jump_pa":       float(np.max(np.abs(histories["back_jump"]))),
             "front_center_peak":       spectrum_peak(histories["front_center_w"], dt),
             "back_center_peak":        spectrum_peak(histories["back_center_w"], dt),
-            "obs_pressure_peak":       spectrum_peak(histories["obs_pressure"], dt),
+            "front_obs_pressure_peak": spectrum_peak(histories["front_obs_pressure"], dt),
+            "back_obs_pressure_peak":  spectrum_peak(histories["back_obs_pressure"], dt),
             "front_center_peak_time":  peak_value(histories["front_center_w"], t_axis),
             "back_center_peak_time":   peak_value(histories["back_center_w"], t_axis),
             "post_drive":              post_drive_analysis(histories, t_axis, dt),
@@ -1602,9 +1622,10 @@ def main():
         np.save(OUTPUT_NPY, np.asarray(volume_frames, dtype=np.float32))
 
     if args.save_obs_npy:
-        OUTPUT_OBS_NPY = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_obs_pressure.npy"
-        np.save(OUTPUT_OBS_NPY, histories["obs_pressure"].astype(np.float32))
-        print(f"Saved un-subsampled observation pressure wave to: {OUTPUT_OBS_NPY}")
+        for side in ("front", "back"):
+            obs_path = DEFAULT_OUTPUT_DIR / f"{OUTPUT_STEM}_{side}_obs_pressure.npy"
+            np.save(obs_path, histories[f"{side}_obs_pressure"].astype(np.float32))
+            print(f"Saved un-subsampled {side} observation pressure wave to: {obs_path}")
 
     if args.save_png:
         save_diagnostic_png(
